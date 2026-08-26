@@ -1,0 +1,19 @@
+node_modules/
+out/
+release/
+dist/
+.vite/
+*.log
+.DS_Store
+.codebuddy/
+
+# 语音模型（体积大，需自行下载，见 README）
+models/
+
+# 打包分发产物
+win-SiriAI/
+*.exe
+
+# 历史版本备份 / 归档（不纳入版本控制）
+archive/
+beta3-cmp/

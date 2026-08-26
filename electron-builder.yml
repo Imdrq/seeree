@@ -1,0 +1,52 @@
+appId: com.seeree.desktop
+productName: Seeree
+directories:
+  buildResources: build
+  output: release
+
+files:
+  - 'out/**'
+  - 'package.json'
+  - '!models/**'
+  - '!**/*.map'
+  - '!node_modules/vosk-browser/**'
+  - '!node_modules/uuid/**'
+
+extraResources:
+  - from: models
+    to: models
+    filter: ['*.tar.gz']
+  - from: assets
+    to: assets
+
+win:
+  icon: assets/app-icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: ${name}-Setup-${version}.${ext}
+
+portable:
+  artifactName: Seeree-portable-${version}.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  # 卸载时同时删除应用的用户数据（配置、语音模型缓存、聊天记录等），彻底删干净
+  deleteAppDataOnUninstall: true
+
+mac:
+  icon: assets/app-icon.png
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  category: public.app-category.productivity
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]

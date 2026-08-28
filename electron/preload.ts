@@ -24,4 +24,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
     messages: { role: string; content: string }[]
   }) => ipcRenderer.invoke('chat-completion', params),
   abortChat: () => ipcRenderer.invoke('abort-chat'),
+  saveNote: (text: string) => ipcRenderer.invoke('save-note', text),
 })

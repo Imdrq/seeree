@@ -2,9 +2,9 @@
 
 Seeree 是一款基于 Electron 构建的本地 AI 语音助手，专为 Windows 打造，让 Windows 用户也能获得类似 macOS 上 Siri 的语音交互体验。macOS 已有 Siri，因此本应用不兼容、也不计划支持 macOS。
 
-液态玻璃悬浮球常驻桌面，点击气泡或按住 T 键即可说话，玻璃球会随音量以彩色丝带动态律动。
+液态玻璃悬浮球常驻桌面，点击气泡或按 Ctrl+T 即可说话，玻璃球会随音量以彩色丝带动态律动。
 
-作者：Ricky。当前版本 0.0.1 正式版。
+作者：Ricky。当前版本 0.0.2 正式版。
 
 ---
 
@@ -14,11 +14,17 @@ Seeree 是一款基于 Electron 构建的本地 AI 语音助手，专为 Windows
 
 **本地离线语音识别**：基于 Vosk（WebAssembly 离线推理），中文高精度模型，不上传任何音频。
 
-**AI 后端**：0.0.1 版本仅支持 Ollama 本地后端，建议使用 qwen2.5:1.5b 模型。
+**AI 后端**：0.0.2 版本仅支持 Ollama 本地后端，建议使用 qwen2.5:1.5b 模型。
 
 **语音回复**：系统语音朗读 AI 回答，说话时丝带随音量律动反馈。
 
-**悬浮球交互**：常驻桌面、托盘驻留、Alt+Space 全局显示或隐藏；点击气泡或按住 T 键说话。
+**语音记事本**：说"记事"后 Seeree 会提示"开始记录"，你接着说的话将被保存为文本文档。首次使用会在桌面创建「seeree记事本」文件夹，后续记录都存放在其中。
+
+**连续会话**：按一次 Ctrl+T 后可持续对话，回答完自动接着听下一句。说"结束"、"再见"可退出，或点击气泡、按 Esc 结束。
+
+**打招呼自我介绍**：说"你好"等问候语时，Seeree 会介绍自己是语音助手；日常问答则不会自我介绍。
+
+**悬浮球交互**：常驻桌面、托盘驻留、Alt+Space 全局显示或隐藏；点击气泡或按 Ctrl+T 说话。
 
 ## 快速开始
 
@@ -33,7 +39,7 @@ npm run dev
 
 ## AI 后端配置
 
-0.0.1 版本仅支持 Ollama 本地后端，建议使用 qwen2.5:1.5b 模型。
+0.0.2 版本仅支持 Ollama 本地后端，建议使用 qwen2.5:1.5b 模型。
 
 安装并启动 Ollama（默认端口 11434），然后拉取推荐模型：
 
@@ -76,11 +82,17 @@ Electron、electron-vite、React、TypeScript、vosk-browser、Canvas 2D 玻璃�
 
 **Local offline speech recognition**: Powered by Vosk (WebAssembly offline inference), with a high-accuracy Chinese model. No audio is uploaded anywhere.
 
-**AI backend**: Version 0.0.1 supports only the local Ollama backend, with qwen2.5:1.5b recommended.
+**AI backend**: Version 0.0.2 supports only the local Ollama backend, with qwen2.5:1.5b recommended.
 
 **Voice replies**: AI answers are read aloud through system TTS, with the ribbon animating in sync with your voice.
 
-**Floating bubble interaction**: Stays on the desktop, dwells in the system tray, and toggles globally with Alt+Space. Click the bubble or hold the T key to speak.
+**Voice notes**: Say "note" and Seeree will prompt "start recording"; whatever you say next is saved to a text file. On first use, a folder named "seeree记事本" is created on the desktop, and all subsequent notes are stored there.
+
+**Continuous conversation**: Press Ctrl+T once to keep talking — after each answer, Seeree listens again automatically. Say "结束/再见" (end/goodbye) to exit, or click the bubble / press Esc to end.
+
+**Greeting intro**: Say "你好" (hello) and Seeree introduces itself as a voice assistant; in everyday Q&A it won't self-introduce.
+
+**Floating bubble interaction**: Stays on the desktop, dwells in the system tray, and toggles globally with Alt+Space. Click the bubble or press Ctrl+T to speak.
 
 ## Quick Start
 
@@ -95,7 +107,7 @@ Recognition uses vosk-browser for offline inference. The bundled Chinese model v
 
 ## AI Backend
 
-Version 0.0.1 supports only the local Ollama backend, with qwen2.5:1.5b recommended.
+Version 0.0.2 supports only the local Ollama backend, with qwen2.5:1.5b recommended.
 
 Install and start Ollama (default port 11434), then pull the recommended model:
 

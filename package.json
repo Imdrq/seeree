@@ -1,6 +1,6 @@
 {
   "name": "seeree-windows",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Seeree for Windows — Liquid Glass AI Desktop Assistant",
   "author": "Ricky",
   "main": "./out/main/main.js",

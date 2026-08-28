@@ -41,12 +41,12 @@ export function useMicrophone(): MicData {
     setError(null)
 
     try {
-      // 1. 获取麦克风流
+      // 1. 获取麦克风流（开启回声消除，防止 TTS 播报被麦克风捕获形成自听循环）
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
           sampleRate: { ideal: 44100 },
           channelCount: { ideal: 1 },
         }

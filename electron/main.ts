@@ -2,6 +2,7 @@ import { app, BrowserWindow, screen, globalShortcut, ipcMain, session, systemPre
 import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { statSync, createReadStream } from 'fs'
+import { mkdir, writeFile } from 'fs/promises'
 import { Readable } from 'stream'
 import { is } from '@electron-toolkit/utils'
 import OpenAI from 'openai'
@@ -390,6 +391,28 @@ function registerIpcHandlers(): void {
   ipcMain.handle('abort-chat', () => {
     activeChatController?.abort()
     activeChatController = null
+  })
+
+  // ── 记事本：把用户说的话保存到桌面「seeree记事本」文件夹的 txt 文档 ──
+  ipcMain.handle('save-note', async (_, text: string) => {
+    try {
+      const content = (text || '').trim()
+      if (!content) return { ok: false, message: '记录内容为空' }
+
+      // 桌面/seeree记事本（首次自动创建）
+      const noteDir = join(app.getPath('desktop'), 'seeree记事本')
+      await mkdir(noteDir, { recursive: true })
+
+      // 文件名：按时间戳命名，如 2026-08-28_14-30-05.txt
+      const d = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const filename = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}.txt`
+      const filePath = join(noteDir, filename)
+      await writeFile(filePath, content + '\n', 'utf-8')
+      return { ok: true, path: filePath }
+    } catch (err: any) {
+      return { ok: false, message: err?.message || '记事保存失败' }
+    }
   })
 }
 

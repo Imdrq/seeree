@@ -27,6 +27,7 @@ interface ElectronAPI {
     messages: ChatMessage[]
   }) => Promise<string>
   abortChat: () => Promise<void>
+  saveNote: (text: string) => Promise<{ ok: boolean; path?: string; message?: string }>
 }
 
 interface Window {

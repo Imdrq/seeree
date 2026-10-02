@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import SiriWave from './SiriWave'
-import useVoskRecognition from './useVoskRecognition'
+import useWhisperRecognition from './useWhisperRecognition'
 import { useMicrophone } from './useMicrophone'
 import { useAIConfig } from '../hooks/useAIConfig'
 
@@ -52,31 +52,112 @@ function listenForSpeech(timeoutMs = 10000): Promise<{ text: string | null; erro
 
 function speakText(text: string, onProgress?: (charIndex: number) => void): Promise<void> {
   return new Promise((resolve) => {
-    const utterance = new SpeechSynthesisUtterance(text)
-    utterance.lang = 'zh-CN'
-    utterance.rate = 1.05
-    utterance.pitch = 1.0
+    if (!text) { resolve(); return }
 
-    // 优先用引擎的 boundary 事件做精确进度；引擎不支持时按平均语速估算
-    let boundarySeen = false
-    utterance.onboundary = (e: any) => {
-      if (typeof e?.charIndex === 'number') {
-        boundarySeen = true
-        onProgress?.(e.charIndex)
+    // Chrome 有已知 bug：长 utterance 约 15s 后被截断且不触发 onend，
+    // 因此按句切块播报，并给每块加兜底超时。
+    const chunks = splitForSpeech(text)
+    let idx = 0
+    let cancelled = false
+
+    const done = () => {
+      if (cancelled) return
+      cancelled = true
+      onProgress?.(text.length)
+      resolve()
+    }
+
+    const speakNext = () => {
+      if (cancelled) return
+      if (idx >= chunks.length) { done(); return }
+      const chunk = chunks[idx]
+      const chunkStart = chunks.slice(0, idx).reduce((n, c) => n + c.length, 0)
+      const utterance = new SpeechSynthesisUtterance(chunk)
+      utterance.lang = 'zh-CN'
+      utterance.rate = 1.05
+      utterance.pitch = 1.0
+
+      let settled = false
+      let boundarySeen = false
+      const startAt = Date.now()
+
+      // 每块兜底超时：按语速估算 + 8s 余量，防止 onend 不触发导致会话锁死
+      const estMs = 600 + (chunk.length * 170) / utterance.rate
+      const hardTimer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        idx++
+        speakNext()
+      }, estMs + 8000)
+
+      utterance.onboundary = (e: any) => {
+        if (typeof e?.charIndex === 'number') {
+          boundarySeen = true
+          onProgress?.(chunkStart + e.charIndex)
+        }
+      }
+      const estTimer = setInterval(() => {
+        if (boundarySeen || settled) return
+        const p = Math.min(1, (Date.now() - startAt) / estMs)
+        onProgress?.(chunkStart + Math.round(chunk.length * p))
+      }, 120)
+
+      utterance.onend = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(hardTimer)
+        clearInterval(estTimer)
+        onProgress?.(chunkStart + chunk.length)
+        idx++
+        speakNext()
+      }
+      utterance.onerror = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(hardTimer)
+        clearInterval(estTimer)
+        // 出错也继续下一块，避免整体卡死
+        idx++
+        speakNext()
+      }
+
+      try {
+        window.speechSynthesis.speak(utterance)
+      } catch {
+        if (settled) return
+        settled = true
+        clearTimeout(hardTimer)
+        clearInterval(estTimer)
+        idx++
+        speakNext()
       }
     }
-    const estMs = 900 + (text.length * 170) / utterance.rate
-    const startedAt = Date.now()
-    const timer = setInterval(() => {
-      if (boundarySeen) return
-      const p = Math.min(1, (Date.now() - startedAt) / estMs)
-      onProgress?.(Math.round(text.length * p))
-    }, 120)
 
-    utterance.onend = () => { clearInterval(timer); onProgress?.(text.length); resolve() }
-    utterance.onerror = () => { clearInterval(timer); resolve() }
-    window.speechSynthesis.speak(utterance)
+    speakNext()
   })
+}
+
+/** 按句切块，保证每块长度可控，规避 Chrome TTS 长文本截断 bug */
+function splitForSpeech(text: string, maxLen = 80): string[] {
+  if (text.length <= maxLen) return [text]
+  const sentences = text.split(/(?<=[。！？!?；;\n])/).filter((s) => s.trim())
+  const chunks: string[] = []
+  let buf = ''
+  for (const s of sentences) {
+    if (buf && buf.length + s.length > maxLen) {
+      chunks.push(buf)
+      buf = s
+    } else {
+      buf += s
+    }
+    // 单句超长时硬切
+    while (buf.length > maxLen) {
+      chunks.push(buf.slice(0, maxLen))
+      buf = buf.slice(maxLen)
+    }
+  }
+  if (buf.trim()) chunks.push(buf)
+  return chunks.length > 0 ? chunks : [text]
 }
 
 /** 去掉 AI 回复中的 emoji / 颜文字 / 图形符号（配合 system prompt 双保险） */
@@ -92,15 +173,38 @@ function stripEmoji(s: string): string {
 /** 触发"开始记录"的指令词：检测到后提示开始记录，用户说的下一句话将被保存 */
 const NOTE_TRIGGER_KEYWORDS = [
   '记事', '记事本',
-  '记一下', '记下', '记住', '记一记', '记一笔', '备忘录',
+  '记一下', '记下', '记一记', '记一笔', '备忘录',
   '开始记录', '记录一下', '帮我记录', '帮我记一下', '帮我记',
-  '即使', // 音近：vosk 常把"记事"识别成"即使"
-  '计时', // 音近变体
-  '既是', // 音近：实测"记事"最常被识别成"既是"
 ]
+/**
+ * 音近容错词：vosk 常把"记事"识别成这些。
+ * 仅在极短独立指令（≤3 字）时生效，避免"开始计时""即使今天下雨"等正常语句误触发。
+ */
+const NOTE_TRIGGER_LOOSE_KEYWORDS = ['即使', '既是', '计时']
 
+/**
+ * 计时/闹钟类意图：与"记事"音近，但语义是计时。
+ * 命中时绝不进记事模式，即使句中含音近词。
+ * 单独说"计时"（无上下文）视为可能的"记事"误识别，放行给记事。
+ */
+function isTimerCommand(text: string): boolean {
+  // "计时" 与动词/时长搭配 → 明确计时意图
+  if (/计时/.test(text) && /开始|停止|暂停|继续|结束|帮我|给我|倒|器|分钟|秒钟|小时|[一二三四五六七八九十百千\d]/.test(text)) {
+    return true
+  }
+  return /倒计时|计时器|秒表|闹钟|定时/.test(text)
+}
+
+/** 记事指令检测 */
 function isNoteTrigger(text: string): boolean {
-  return NOTE_TRIGGER_KEYWORDS.some((kw) => text.includes(kw))
+  const t = text.trim()
+  // 精确指令词直接触发（优先级最高）
+  if (NOTE_TRIGGER_KEYWORDS.some((kw) => t.includes(kw))) return true
+  // 音近容错：极短独立指令才认，排除计时类意图
+  if (t.length <= 3 && !isTimerCommand(t) && NOTE_TRIGGER_LOOSE_KEYWORDS.some((kw) => t.includes(kw))) {
+    return true
+  }
+  return false
 }
 
 /** 自听检测：识别结果与刚播报的 TTS 内容高度相似 → 判定为捕获到自己的声音，应丢弃 */
@@ -120,13 +224,67 @@ function isSelfEcho(newText: string, spokenText: string): boolean {
   return a.length >= 4 && common / Math.min(setA.size, setB.size) > 0.7
 }
 
+/* ═══════════ 联网搜索意图检测 ═══════════ */
+
+const SEARCH_TRIGGERS = [
+  '搜索', '搜一下', '查一下', '查查', '帮我搜', '帮我查',
+  '最新', '新闻', '今天', '天气', '股价', '比赛', '实时',
+]
+
+function needsSearch(text: string): boolean {
+  return SEARCH_TRIGGERS.some((kw) => text.includes(kw))
+}
+
 /* ═══════════ 会话结束指令 ═══════════ */
 
 /** 说"结束/退出/再见"等 → 退出连续对话循环 */
-const SESSION_END_KEYWORDS = ['结束', '退出', '再见', '拜拜', '不聊了', '退下']
+const SESSION_END_KEYWORDS = ['再见', '拜拜', '不聊了', '退下']
+/** 较常见的词，仅在极短指令中才视为结束指令，避免"结束这个任务"等误触发 */
+const SESSION_END_LOOSE_KEYWORDS = ['结束', '退出']
 
+/**
+ * 会话结束指令检测：
+ * - "再见/拜拜/不聊了/退下" 语义明确，任意位置出现即可
+ * - "结束/退出" 太常见，仅在极短独立指令（≤4 字）中生效
+ */
 function isSessionEnd(text: string): boolean {
-  return SESSION_END_KEYWORDS.some((kw) => text.includes(kw))
+  const t = text.trim()
+  if (SESSION_END_KEYWORDS.some((kw) => t.includes(kw))) return true
+  if (t.length <= 4 && SESSION_END_LOOSE_KEYWORDS.some((kw) => t.includes(kw))) return true
+  return false
+}
+
+/** LLM 同音字纠错：根据上下文修正语音识别中的同音字错误 */
+async function correctHomophones(
+  rawText: string,
+  chatFn: typeof window.electronAPI.chatCompletion,
+  config: { provider: string; apiKey: string; model: string; baseUrl: string }
+): Promise<string> {
+  // 短文本（≤4字）不需要纠错，避免浪费时间
+  if (rawText.length <= 4) return rawText
+  try {
+    const corrected = await chatFn({
+      provider: config.provider,
+      apiKey: config.apiKey,
+      model: config.model,
+      baseUrl: config.baseUrl,
+      messages: [
+        {
+          role: 'system',
+          content: '你是语音识别纠错助手。用户提供的文本是语音转文字的结果，可能存在同音字错误。请根据上下文和语义修正错误的同音字，保持原意不变。只输出修正后的文本，不要任何解释。',
+        },
+        { role: 'user', content: rawText },
+      ],
+    })
+    const clean = corrected?.trim() || ''
+    // 纠错结果太离谱时丢弃，用原文
+    if (clean && clean.length >= rawText.length * 0.5 && clean.length <= rawText.length * 2) {
+      return clean
+    }
+    return rawText
+  } catch {
+    return rawText // 纠错失败不影响主流程
+  }
 }
 
 /* ═══════════ 组件 ═══════════ */
@@ -135,8 +293,8 @@ type Status = 'idle' | 'listening' | 'processing' | 'speaking'
 
 export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => void }): JSX.Element {
   const { volumeRef, start: micStart, stop: micStop } = useMicrophone()
-  const { recognize } = useVoskRecognition()
-  const { config, isConfigured } = useAIConfig()
+  const { recognize } = useWhisperRecognition()
+  const { config, isConfigured, searchConfig } = useAIConfig()
   const pillRadius = H / 2
   const abortRef = useRef(false)
   /** 连续会话激活：按一次 Ctrl+T 后，回答完不进入休眠，接着听下一句 */
@@ -151,6 +309,42 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   // Ctrl+T 触发说话：按下时玻璃球亮度提升 1.5%
   const [keyHeld, setKeyHeld] = useState(false)
+  /** 会话循环正在运行（同步互斥锁，防止双击/快捷键并发触发双会话） */
+  const runningRef = useRef(false)
+  /** 会话空闲计时（毫秒），超过自动退出 */
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 思考/播报中是否允许打断（可在设置中修改） */
+  const [lockDuringResponse, setLockDuringResponse] = useState(() => {
+    try { return localStorage.getItem('seeree-lock-response') !== '0' } catch { return true }
+  })
+
+  /** 重置空闲计时器（仅聆听阶段启动，思考/播报时调用 clearIdleTimer 暂停） */
+  const resetIdleTimer = useCallback(() => {
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current)
+    idleTimerRef.current = setTimeout(() => {
+      // 仅在聆听中才超时退出，思考/播报不打断
+      if (runningRef.current && sessionActiveRef.current && status === 'listening') {
+        abortRef.current = true
+        sessionActiveRef.current = false
+        runningRef.current = false
+        micStop()
+        window.speechSynthesis.cancel()
+        window.electronAPI?.abortChat?.()
+        setStatus('idle')
+        setStatusText('')
+        setSpeechText(null)
+        setReadIndex(0)
+      }
+    }, 30000)
+  }, [micStop, status])
+
+  /** 暂停空闲计时（思考/播报期间不计时，避免 AI 响应慢被误杀） */
+  const clearIdleTimer = useCallback(() => {
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current)
+      idleTimerRef.current = null
+    }
+  }, [])
 
   /* 朗读字幕：全文 + 已读字符数 */
   const [speechText, setSpeechText] = useState<string | null>(null)
@@ -171,8 +365,23 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
 
   /* ─── 主流程（连续会话：听 → 处理 → 回答完接着听） ─── */
   const handleToggle = useCallback(async () => {
-    // AI 响应中（思考/播报）→ 锁定，禁止再次输入/取消，防止打断回答
+    // AI 响应中（思考/播报）→ 根据设置决定是否可打断
     if (status === 'processing' || status === 'speaking') {
+      if (lockDuringResponse) return // 锁定：不可打断
+      // 可打断：取消当前回答
+      abortRef.current = true
+      sessionActiveRef.current = false
+      noteModeRef.current = false
+      lastSpokenRef.current = ''
+      window.speechSynthesis.cancel()
+      window.electronAPI?.abortChat?.()
+      runningRef.current = false
+      clearIdleTimer()
+      setStatus('idle')
+      setStatusText('')
+      setErrorMsg(null)
+      setSpeechText(null)
+      setReadIndex(0)
       return
     }
 
@@ -185,6 +394,7 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
       micStop()
       window.speechSynthesis.cancel()
       window.electronAPI?.abortChat?.()
+      runningRef.current = false
       setStatus('idle')
       setStatusText('')
       setErrorMsg(null)
@@ -192,6 +402,10 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
       setReadIndex(0)
       return
     }
+
+    // 同步互斥：防止双击 / Ctrl+T+点击 并发进入双会话
+    if (runningRef.current) return
+    runningRef.current = true
 
     // idle → 进入连续会话
     abortRef.current = false
@@ -201,10 +415,12 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
     setErrorMsg(null)
     setStatusText('')
 
+    try {
     while (sessionActiveRef.current && !abortRef.current) {
       // ── ① 聆听：优先本地离线识别，硬错误时回退 Web Speech ──
       setStatus('listening')
       setStatusText('')
+      resetIdleTimer()
 
       // 复用同一条麦克风流驱动音量，避免 vosk 与音量分析各开一条流导致丝带不动
       let micStream: MediaStream | undefined
@@ -218,9 +434,8 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
         return
       }
 
-      let result = await recognize(12000, (partial) => {
-        // 说话过程中实时回显识别中的文字，避免"等很久才出字"
-        setStatusText(`你: "${partial}"`)
+      let result = await recognize(15000, (status) => {
+        setStatusText(status)
       }, micStream)
       if (abortRef.current || !sessionActiveRef.current) { micStop(); break }
       const hardError = result.error && !result.error.startsWith('未检测到') && !result.error.startsWith('超时')
@@ -242,7 +457,14 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
         continue
       }
 
-      const text = result.text
+      let text = result.text
+      resetIdleTimer() // 有语音活动，重置空闲计时
+
+      // ── LLM 同音字纠错 ──
+      if (isConfigured) {
+        setStatusText('正在修正...')
+        text = await correctHomophones(text, window.electronAPI!.chatCompletion!, config)
+      }
 
       // 自听防护：若识别内容与刚播报的 TTS 高度相似，判定为捕获到自己的声音，丢弃后继续听
       if (lastSpokenRef.current && isSelfEcho(text, lastSpokenRef.current)) {
@@ -259,6 +481,7 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
         lastSpokenRef.current = byeText
         setSpeechText(byeText)
         setReadIndex(0)
+        clearIdleTimer()
         setStatus('speaking')
         await speakText(byeText)
         setReadIndex(byeText.length)
@@ -289,6 +512,7 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
         lastSpokenRef.current = confirmText
         setSpeechText(text)
         setReadIndex(0)
+        clearIdleTimer()
         setStatus('speaking')
         await speakText(confirmText, (i) => setReadIndex(Math.round((i / confirmText.length) * text.length)))
         setReadIndex(text.length)
@@ -305,6 +529,7 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
         lastSpokenRef.current = '开始记录'
         setSpeechText('开始记录')
         setReadIndex(0)
+        clearIdleTimer()
         setStatus('speaking')
         await speakText('开始记录')
         setReadIndex(4)
@@ -320,6 +545,7 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
         const echo = text.length > 50 ? text.slice(0, 50) + '…' : text
         lastSpokenRef.current = echo
         setStatusText(`已识别: ${echo}`)
+        clearIdleTimer()
         setStatus('speaking')
         await speakText(text)
         if (abortRef.current || !sessionActiveRef.current) break
@@ -327,23 +553,60 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
       }
 
       // ── ⑥ 思考 / 回答 ──
+      clearIdleTimer() // 思考/播报期间不计空闲
       setStatus('processing')
       setStatusText('') // 清掉"你: xxx"，让 label 显示"正在回答"
 
+      // 联网搜索：需要时先搜再答
+      let searchContext = ''
+      const searchReady = searchConfig.enabled && (
+        searchConfig.provider === 'searxng'
+          ? !!searchConfig.instanceUrl
+          : !!searchConfig.apiKey
+      )
+      if (needsSearch(text) && searchReady) {
+        try {
+          setStatusText('正在搜索...')
+          const sr = await window.electronAPI!.webSearch({
+            query: text,
+            provider: searchConfig.provider,
+            apiKey: searchConfig.apiKey,
+            instanceUrl: searchConfig.instanceUrl,
+            maxResults: 5,
+            timeout: searchConfig.timeout,
+          })
+          if (sr.ok && sr.results.length > 0) {
+            searchContext = sr.results.map((r, i) =>
+              `[${i + 1}] ${r.title} | ${r.source || ''} | ${r.snippet}`
+            ).join('\n')
+          } else if (!sr.ok && sr.message) {
+            // 搜索失败不阻断，降级为直接回答
+            console.warn('[search]', sr.message)
+          }
+        } catch (err: any) {
+          console.warn('[search] error:', err?.message)
+        }
+        if (abortRef.current || !sessionActiveRef.current) break
+        setStatusText('')
+      }
+
       try {
+        const systemPrompt = /你好|您好|hi|hello|哈喽|hey/i.test(text)
+          ? '你是 Seeree 桌面语音助手，由 Ricky 制作。请用中文简洁实用地回答用户问题。当用户向你问好或询问你是谁时，可以简短地介绍自己是 Seeree 语音助手。不要使用任何表情符号、emoji、颜文字或特殊图形符号。'
+          : '你是 Seeree 桌面语音助手，由 Ricky 制作。请用中文简洁实用地回答用户问题。不要在回答中自我介绍、提及你的名字或开发者。不要使用任何表情符号、emoji、颜文字或特殊图形符号。'
+
+        const userMessage = searchContext
+          ? `以下是网络搜索结果（请据此回答并标注来源编号）：\n${searchContext}\n\n用户问题：${text}`
+          : text
+
         const reply = await window.electronAPI!.chatCompletion({
           provider: config.provider,
           apiKey: config.apiKey,
           model: config.model,
           baseUrl: config.baseUrl,
           messages: [
-            {
-              role: 'system',
-              content: /你好|您好|hi|hello|哈喽|hey/i.test(text)
-                ? '你是 Seeree 桌面语音助手，由 Ricky 制作。请用中文简洁实用地回答用户问题。当用户向你问好或询问你是谁时，可以简短地介绍自己是 Seeree 语音助手。不要使用任何表情符号、emoji、颜文字或特殊图形符号。'
-                : '你是 Seeree 桌面语音助手，由 Ricky 制作。请用中文简洁实用地回答用户问题。不要在回答中自我介绍、提及你的名字或开发者。不要使用任何表情符号、emoji、颜文字或特殊图形符号。',
-            },
-            { role: 'user', content: text },
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMessage },
           ],
         })
 
@@ -364,6 +627,7 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
         lastSpokenRef.current = clean
         setSpeechText(clean)
         setReadIndex(0)
+        clearIdleTimer()
         setStatus('speaking')
         await speakText(clean, (i) => setReadIndex(i))
 
@@ -390,31 +654,63 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
 
       // 回答完 → 循环接着听（不进入休眠）
     }
+    } finally {
+      runningRef.current = false
+    }
 
     // 会话结束（被取消）→ 回到待机
     setStatus('idle')
     setStatusText('')
     setSpeechText(null)
     setReadIndex(0)
-  }, [status, config, isConfigured, micStart, micStop])
+  }, [status, config, isConfigured, searchConfig, lockDuringResponse, micStart, micStop, resetIdleTimer, clearIdleTimer])
 
 
 
   /* ─── 键盘快捷键 ─── */
   // 取消/结束当前会话（Esc 触发）
   const cancelSession = useCallback(() => {
+    abortRef.current = true
     sessionActiveRef.current = false
     noteModeRef.current = false
     lastSpokenRef.current = ''
     window.speechSynthesis.cancel()
     micStop()
     window.electronAPI?.abortChat?.()
+    runningRef.current = false
+    clearIdleTimer()
     setStatus('idle')
     setStatusText('')
     setErrorMsg(null)
     setSpeechText(null)
     setReadIndex(0)
-  }, [micStop])
+  }, [micStop, clearIdleTimer])
+
+  // 窗口失焦 / 隐藏时自动取消会话（防止后台继续听和回答）
+  // 但思考/播报中不打断（锁定模式下），只在聆听中取消
+  useEffect(() => {
+    const shouldCancelOnBlur = () => runningRef.current && status === 'listening'
+    const onVisibility = () => {
+      if (document.hidden && shouldCancelOnBlur()) {
+        cancelSession()
+      }
+    }
+    const onBlur = () => {
+      if (shouldCancelOnBlur()) {
+        setTimeout(() => {
+          if (shouldCancelOnBlur() && !document.hasFocus()) {
+            cancelSession()
+          }
+        }, 500)
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('blur', onBlur)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('blur', onBlur)
+    }
+  }, [cancelSession, status])
 
   useEffect(() => {
     // 是否在输入框内（Ctrl+T 不干扰打字）
@@ -432,13 +728,8 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
         e.preventDefault()
         if (e.repeat) return
         setKeyHeld(true)
-        if (status === 'idle') {
-          handleToggle()
-        } else if (status === 'listening') {
-          // 已在聆听：继续说话，不做额外动作
-        } else {
-          // processing/speaking 中：保持锁定，不打断
-        }
+        // idle → 开始；listening/processing/speaking → 取消
+        handleToggle()
       }
     }
 
@@ -485,8 +776,8 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
         overflow: 'hidden',
         background: 'transparent',
         boxSizing: 'border-box',
-        WebkitAppRegion: 'drag' as any,
-      }}>
+        WebkitAppRegion: 'drag',
+      } as any}>
         {/* ═══════════ 泡泡主体 ═══════════ */}
           <div
             onClick={handleToggle}
@@ -505,7 +796,7 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
               justifyContent: 'center',
               cursor: 'pointer',
               overflow: 'hidden',
-              WebkitAppRegion: 'no-drag' as any,
+              WebkitAppRegion: 'no-drag',
               background:
                 status !== 'idle'
                   ? 'rgba(20,10,40,0.5)'
@@ -520,7 +811,7 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
               ].join(', '),
               border: '1px solid rgba(255,255,255,0.1)',
               transition: 'background 0.3s ease, backdrop-filter 0.15s ease',
-            }}
+            } as any}
           >
             {/* 内表面径向渐变 */}
             <div style={{
@@ -665,7 +956,7 @@ function GearIcon() {
 
 /* ═══════════ 样式 ═══════════ */
 
-const gearBtnStyle: React.CSSProperties = {
+const gearBtnStyle: any = {
   position: 'absolute',
   top: 12,
   right: 12,
@@ -681,7 +972,7 @@ const gearBtnStyle: React.CSSProperties = {
   justifyContent: 'center',
   zIndex: 10,
   transition: 'all 0.18s ease',
-  WebkitAppRegion: 'no-drag' as any,
+  WebkitAppRegion: 'no-drag',
 }
 
 const keyHintStyle: React.CSSProperties = {

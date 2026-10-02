@@ -1,15 +1,15 @@
 @echo off
 chcp 65001 >nul
-title SiriAI Windows
+title Seeree
 
 cd /d "%~dp0"
 
 echo ========================================
-echo   SiriAI Windows - 启动中...
+echo   Seeree - 启动中...
 echo ========================================
 echo.
 
-:: 先停掉旧进程，避免端口冲突
+:: 先停掉旧进程，避免冲突
 taskkill /f /im electron.exe >nul 2>&1
 
 :: 检查 node_modules 是否存在

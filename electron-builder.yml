@@ -18,6 +18,12 @@ extraResources:
     filter: ['*.tar.gz']
   - from: assets
     to: assets
+  - from: whisper.cpp
+    to: whisper
+    filter:
+      - 'whisper-cli.exe'
+      - '*.dll'
+      - 'ggml-small.bin'
 
 win:
   icon: assets/app-icon.png

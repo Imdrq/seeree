@@ -1,8 +1,9 @@
-declare module '*.vert' {
-  const value: string
-  export default value
+declare module '*.vert?raw' {
+  const content: string
+  export default content
 }
-declare module '*.frag' {
-  const value: string
-  export default value
+
+declare module '*.frag?raw' {
+  const content: string
+  export default content
 }

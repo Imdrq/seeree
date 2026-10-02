@@ -57,7 +57,8 @@ export default function useVoskRecognition() {
     return new Promise((resolve) => {
       let settled = false
       let silenceMs = 0
-      const SILENCE_LIMIT = 1000 // 静音 1s → 判定说话结束（缩短等待，降低延迟感）
+      let finalRequested = false
+      const SILENCE_LIMIT = 1500 // 静音 1.5s 再判定结束，避免说话中途被截断
 
       const cleanup = () => {
         if (totalTimerRef.current) clearTimeout(totalTimerRef.current)
@@ -124,19 +125,32 @@ export default function useVoskRecognition() {
           if (externalStream) {
             stream = externalStream
           } else {
+            // noiseSuppression 关掉——它会误伤语音导致识别率下降
+            // autoGainControl 开启——自动调节音量，小声说话也能识别
             stream = await navigator.mediaDevices.getUserMedia({
-              audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+              audio: {
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: false,
+                autoGainControl: true,
+                sampleRate: { ideal: 16000 },
+              }
             })
           }
           try {
             ctx = new AudioContext({ sampleRate: 16000 })
           } catch {
-            ctx = new AudioContext() // 设备不支持 16k 时降级，后续重采样
+            ctx = new AudioContext()
           }
           source = ctx.createMediaStreamSource(stream)
-          processor = ctx.createScriptProcessor(2048, 1, 1)
+          processor = ctx.createScriptProcessor(4096, 1, 1) // 4096 缓冲区，频率分辨率更好
           source.connect(processor)
-          processor.connect(ctx.destination)
+          // ScriptProcessorNode 必须连到 destination 才会触发 onaudioprocess，
+          // 但直接连会把麦克风送到扬声器造成回声。用 gain=0 的静音节点中转。
+          const mute = ctx.createGain()
+          mute.gain.value = 0
+          processor.connect(mute)
+          mute.connect(ctx.destination)
         } catch (err: any) {
           finish('', `麦克风访问失败: ${err?.message || String(err)}`)
           return
@@ -148,7 +162,10 @@ export default function useVoskRecognition() {
 
         // 4. 总超时兜底
         totalTimerRef.current = setTimeout(() => {
-          try { rec.retrieveFinalResult() } catch { /* ok */ }
+          if (!finalRequested) {
+            finalRequested = true
+            try { rec.retrieveFinalResult() } catch { /* ok */ }
+          }
           finalTimerRef.current = setTimeout(() => finish(''), 800)
         }, timeoutMs)
 
@@ -160,12 +177,13 @@ export default function useVoskRecognition() {
           let sum = 0
           for (let i = 0; i < input.length; i++) sum += input[i] * input[i]
           const rms = Math.sqrt(sum / input.length)
-          if (rms < 0.01) silenceMs += (input.length / ctx.sampleRate) * 1000
+          if (rms < 0.005) silenceMs += (input.length / ctx.sampleRate) * 1000 // 更灵敏：0.005 才算静音
           else silenceMs = 0
           try { rec.acceptWaveformFloat(pcm, 16000) } catch { /* ok */ }
 
-          // 静音足够久 → 强制取最终结果
-          if (silenceMs > SILENCE_LIMIT) {
+          // 静音足够久 → 强制取最终结果（只请求一次）
+          if (silenceMs > SILENCE_LIMIT && !finalRequested) {
+            finalRequested = true
             try { rec.retrieveFinalResult() } catch { /* ok */ }
           }
         }

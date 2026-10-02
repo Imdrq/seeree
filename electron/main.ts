@@ -1,5 +1,5 @@
-import { app, BrowserWindow, screen, globalShortcut, ipcMain, session, systemPreferences, protocol, net, Tray, Menu, nativeImage } from 'electron'
-import { join } from 'path'
+import { app, BrowserWindow, screen, globalShortcut, ipcMain, session, systemPreferences, protocol, net, Tray, Menu, nativeImage, safeStorage, desktopCapturer } from 'electron'
+import { join, normalize, sep } from 'path'
 import { pathToFileURL } from 'url'
 import { statSync, createReadStream } from 'fs'
 import { mkdir, writeFile } from 'fs/promises'
@@ -24,6 +24,18 @@ const OPENAI_MODEL_MAP: Record<string, string> = {
   'GPT-4o': 'gpt-4o',
   'GPT-4-turbo': 'gpt-4-turbo',
   'GPT-3.5-turbo': 'gpt-3.5-turbo',
+}
+
+/** UI 显示名 → Anthropic API 真实 model ID */
+const CLAUDE_MODEL_MAP: Record<string, string> = {
+  'Claude 3.5 Sonnet': 'claude-3-5-sonnet-20241022',
+  'Claude 3 Opus': 'claude-3-opus-20240229',
+  'Claude 3 Haiku': 'claude-3-haiku-20240307',
+  'Claude 3.5 Haiku': 'claude-3-5-haiku-20241022',
+}
+
+function mapClaudeModel(model: string): string {
+  return CLAUDE_MODEL_MAP[model] || model
 }
 
 /* ═══════════ AI Provider 工具函数 ═══════════ */
@@ -71,6 +83,10 @@ async function chatWithOllama(baseUrl: string, model: string, messages: { role: 
       signal,
     })
   } catch (err: any) {
+    // AbortError 是用户主动取消，不应当作连接错误
+    if (err?.name === 'AbortError' || signal?.aborted) {
+      throw new Error('请求已取消')
+    }
     throw new Error(`无法连接 Ollama：${friendlyFetchError(err)}`)
   }
   if (!resp.ok) {
@@ -96,7 +112,7 @@ async function chatWithClaude(apiKey: string, model: string, messages: { role: s
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model,
+        model: mapClaudeModel(model),
         max_tokens: 1000,
         system: sys || undefined,
         messages: rest,
@@ -119,17 +135,15 @@ async function chatWithClaude(apiKey: string, model: string, messages: { role: s
 app.commandLine.appendSwitch('unsafely-treat-insecure-origin-as-secure', 'http://localhost:5173')
 
 let mainWindow: BrowserWindow | null = null
-let settingsWindow: BrowserWindow | null = null
 let tray: Tray | null = null
+/** 预先捕获的桌面背景（进设置面板时截取，避免递归） */
+let pendingGlassBackdrop: string | null = null
 /** 进行中的 AI 请求控制器（取消时中止，防止"双回答"） */
 let activeChatController: AbortController | null = null
 
 /** 显示/隐藏主窗口（供托盘菜单与快捷键复用） */
 function toggleMainWindow(): void {
   if (!mainWindow) return
-  if (settingsWindow && !settingsWindow.isDestroyed() && settingsWindow.isVisible()) {
-    settingsWindow.close()
-  }
   if (mainWindow.isVisible()) {
     mainWindow.hide()
   } else {
@@ -175,6 +189,7 @@ function createWindow(): void {
     y: 30,
     transparent: true,
     frame: false,
+    thickFrame: false,
     alwaysOnTop: true,
     skipTaskbar: false,
     resizable: true,
@@ -189,20 +204,26 @@ function createWindow(): void {
     }
   })
 
+  mainWindow.setHasShadow(false)
   mainWindow.setAlwaysOnTop(true)
+  // 防止窗口被截屏捕获（避免 Liquid Glass 桌面捕获递归）
+  try { mainWindow.setContentProtection(true) } catch { /* ignore */ }
   mainWindow.loadURL(getRendererURL())
 }
 
 function registerIpcHandlers(): void {
-  ipcMain.handle('resize-for-settings', () => {
+  ipcMain.handle('resize-for-settings', async () => {
     if (!mainWindow) return
-    mainWindow.setSize(480, 560)
+    // 不使用 backgroundMaterial:'acrylic'——它作用于整个矩形窗口，CSS 圆角裁不掉，导致圆角外露灰白底
+    pendingGlassBackdrop = null
+    mainWindow.setSize(680, 480)
     mainWindow.center()
     mainWindow.setResizable(false)
   })
 
   ipcMain.handle('resize-for-bubble', () => {
     if (!mainWindow) return
+    pendingGlassBackdrop = null
     const { width: screenW } = screen.getPrimaryDisplay().workAreaSize
     mainWindow.setSize(360, 216)
     mainWindow.setPosition(screenW - 370, 30)
@@ -217,71 +238,20 @@ function registerIpcHandlers(): void {
     app.quit()
   })
 
+  // 设置面板由渲染进程在同一窗口内切换（App.tsx），无需独立设置窗口
   ipcMain.handle('open-settings', () => {
-    if (!mainWindow) return
-
-    // 已有设置窗口 → 直接复用
-    if (settingsWindow && !settingsWindow.isDestroyed()) {
-      settingsWindow.show()
-      settingsWindow.focus()
-      mainWindow.hide()
-      return
-    }
-
-    const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
-    const winW = 480
-    const winH = 560
-
-    settingsWindow = new BrowserWindow({
-      width: winW,
-      height: winH,
-      x: Math.round((screenW - winW) / 2),
-      y: Math.round((screenH - winH) / 2),
-      transparent: false,
-      frame: false,
-      alwaysOnTop: true,
-      skipTaskbar: true,
-      resizable: false,
-      hasShadow: true,
-      backgroundColor: '#0d0d1f',
-      focusable: true,
-      webPreferences: {
-        preload: join(__dirname, '../preload/preload.js'),
-        sandbox: false,
-        contextIsolation: true,
-        nodeIntegration: false
-      }
-    })
-
-    settingsWindow.setAlwaysOnTop(true, 'floating')
-
-    settingsWindow.on('closed', () => {
-      settingsWindow = null
-      mainWindow?.show()
-      mainWindow?.focus()
-    })
-
-    settingsWindow.loadURL(getRendererURL('settings'))
-    // 延迟隐藏主窗口，确保设置窗口先获得焦点
-    setTimeout(() => {
-      mainWindow?.hide()
-    }, 300)
-  })
-
-  ipcMain.handle('close-settings', () => {
-    if (settingsWindow) {
-      settingsWindow.close()
-      settingsWindow = null
-    }
     mainWindow?.show()
     mainWindow?.focus()
   })
 
-  // 窗口拖拽 — 自动识别当前活跃窗口
+  ipcMain.handle('close-settings', () => {
+    mainWindow?.show()
+    mainWindow?.focus()
+  })
+
+  // 窗口拖拽
   ipcMain.handle('move-window', (_, delta: { dx: number; dy: number }) => {
-    const win = settingsWindow && !settingsWindow.isDestroyed() && settingsWindow.isVisible()
-      ? settingsWindow
-      : mainWindow
+    const win = mainWindow
     if (!win || win.isDestroyed()) return
     const [x, y] = win.getPosition()
     win.setPosition(x + delta.dx, y + delta.dy)
@@ -379,9 +349,14 @@ function registerIpcHandlers(): void {
         messages: messages as any,
         temperature: 0.7,
         max_tokens: 1000,
-        signal,
-      })
+      }, { signal })
       return resp.choices[0]?.message?.content || ''
+    } catch (err: any) {
+      // 取消请求时返回空字符串，不抛异常
+      if (err?.message === '请求已取消' || signal?.aborted || err?.name === 'AbortError') {
+        return ''
+      }
+      throw err
     } finally {
       if (activeChatController === controller) activeChatController = null
     }
@@ -414,7 +389,279 @@ function registerIpcHandlers(): void {
       return { ok: false, message: err?.message || '记事保存失败' }
     }
   })
+
+  // ── API Key 加密存储（safeStorage，系统级加密） ──
+  ipcMain.handle('encrypt-api-key', (_, plain: string) => {
+    try {
+      if (!plain) return { ok: true, data: '' }
+      if (!safeStorage.isEncryptionAvailable()) {
+        return { ok: false, message: '系统加密不可用，无法安全保存 API Key' }
+      }
+      const buf = safeStorage.encryptString(plain)
+      return { ok: true, data: buf.toString('base64') }
+    } catch (err: any) {
+      return { ok: false, message: err?.message || '加密失败' }
+    }
+  })
+
+  ipcMain.handle('decrypt-api-key', (_, encoded: string) => {
+    try {
+      if (!encoded) return { ok: true, data: '' }
+      if (!safeStorage.isEncryptionAvailable()) {
+        return { ok: false, message: '系统解密不可用' }
+      }
+      const buf = Buffer.from(encoded, 'base64')
+      return { ok: true, data: safeStorage.decryptString(buf) }
+    } catch (err: any) {
+      return { ok: false, message: err?.message || '解密失败' }
+    }
+  })
+
+  // ── 获取预捕获的桌面背景（Liquid Glass 玻璃纹理） ──
+  ipcMain.handle('capture-desktop-for-glass', () => {
+    if (pendingGlassBackdrop) {
+      return { ok: true, data: pendingGlassBackdrop }
+    }
+    return { ok: false, message: '桌面背景未预捕获' }
+  })
+
+  // ── 联网搜索 ──
+  ipcMain.handle('search:web', async (_, params: {
+    query: string
+    provider: string
+    apiKey: string
+    instanceUrl?: string
+    maxResults?: number
+    timeout?: number
+  }) => {
+    const { query, provider, apiKey, instanceUrl, maxResults = 5, timeout = 8000 } = params
+    if (!query?.trim()) return { ok: false, results: [], message: '搜索内容为空' }
+
+    try {
+      if (provider === 'searxng') {
+        return await searchSearxng(query, instanceUrl || 'https://searx.be', maxResults, timeout)
+      }
+      if (provider === 'tavily') {
+        if (!apiKey) return { ok: false, results: [], message: 'Tavily API Key 未配置' }
+        return await searchTavily(query, apiKey, maxResults, timeout)
+      }
+      return { ok: false, results: [], message: `暂不支持 Provider: ${provider}` }
+    } catch (err: any) {
+      return { ok: false, results: [], message: `搜索失败：${err?.message || String(err)}` }
+    }
+  })
 }
+
+/** SearXNG 元搜索（免费，无需 API Key） */
+async function searchSearxng(query: string, baseUrl: string, maxResults: number, timeout: number) {
+  const base = baseUrl.replace(/\/+$/, '')
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeout)
+
+  try {
+    // 优先尝试 JSON API
+    const url = `${base}/search?q=${encodeURIComponent(query)}&format=json&language=zh`
+    const resp = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+      signal: controller.signal,
+    })
+    clearTimeout(timer)
+
+    if (resp.ok) {
+      const contentType = resp.headers.get('content-type') || ''
+      if (contentType.includes('json')) {
+        const data = await resp.json() as {
+          results?: { title: string; url: string; content: string; score?: number; publishedDate?: string }[]
+        }
+        return normalizeSearchResults(data.results || [], maxResults)
+      }
+    }
+
+    // JSON 不可用 → 回退 HTML 抓取
+    return await searchSearxngHtml(query, base, maxResults, timeout)
+  } catch (err: any) {
+    clearTimeout(timer)
+    if (err?.name === 'AbortError') {
+      // 超时也尝试 HTML 回退
+      try { return await searchSearxngHtml(query, base, maxResults, timeout) }
+      catch { return { ok: false, results: [], message: '搜索超时' } }
+    }
+    // JSON 失败 → 尝试 HTML
+    try { return await searchSearxngHtml(query, base, maxResults, timeout) }
+    catch { return { ok: false, results: [], message: `搜索失败：${err?.message || String(err)}` } }
+  }
+}
+
+/** SearXNG HTML 页面解析（JSON API 不可用时的回退） */
+async function searchSearxngHtml(query: string, baseUrl: string, maxResults: number, timeout: number) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeout)
+
+  try {
+    const url = `${baseUrl}/search?q=${encodeURIComponent(query)}&language=zh`
+    const resp = await fetch(url, {
+      headers: { 'Accept': 'text/html', 'User-Agent': 'Mozilla/5.0' },
+      signal: controller.signal,
+    })
+    clearTimeout(timer)
+
+    if (!resp.ok) {
+      return { ok: false, results: [], message: `SearXNG 错误 (HTTP ${resp.status})` }
+    }
+
+    const html = await resp.text()
+    const results = parseSearxngHtml(html, maxResults)
+
+    if (results.length === 0) {
+      return { ok: false, results: [], message: '搜索无结果（该实例可能不兼容）' }
+    }
+    return { ok: true, results }
+  } catch (err: any) {
+    clearTimeout(timer)
+    if (err?.name === 'AbortError') return { ok: false, results: [], message: '搜索超时' }
+    return { ok: false, results: [], message: `搜索失败：${err?.message || String(err)}` }
+  }
+}
+
+/** 解析 SearXNG HTML 搜索结果 */
+function parseSearxngHtml(html: string, maxResults: number): Array<{ title: string; url: string; snippet: string; source: string }> {
+  const results: Array<{ title: string; url: string; snippet: string; source: string }> = []
+
+  // SearXNG 结果通常在 <article class="result ..."> 或 <div class="result ..."> 中
+  const articleRe = /<article[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/article>/gi
+  const divRe = /<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*(?=<div[^>]*class="[^"]*result|<!--)/gi
+
+  const blocks: string[] = []
+  let m: RegExpExecArray | null
+  while ((m = articleRe.exec(html)) !== null) blocks.push(m[1])
+  if (blocks.length === 0) {
+    while ((m = divRe.exec(html)) !== null) blocks.push(m[1])
+  }
+
+  for (const block of blocks) {
+    if (results.length >= maxResults) break
+
+    // 提取链接和标题
+    const aMatch = block.match(/<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
+    if (!aMatch) continue
+
+    const rawUrl = aMatch[1]
+    // 跳过相对路径（非结果链接）
+    if (!rawUrl.startsWith('http')) continue
+
+    // 清理 HTML 标签得到标题
+    const title = aMatch[2].replace(/<[^>]+>/g, '').trim()
+    if (!title) continue
+
+    // 提取摘要
+    const contentMatch = block.match(/<p[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/p>/i)
+      || block.match(/<div[^>]*class="[^"]*content[^"]*"[^>]*>([\s\S]*?)<\/div>/i)
+    const snippet = (contentMatch?.[1] || '').replace(/<[^>]+>/g, '').trim()
+
+    results.push({
+      title: title.slice(0, 120),
+      url: rawUrl,
+      snippet: snippet.slice(0, 500),
+      source: safeDomain(rawUrl),
+    })
+  }
+
+  return results
+}
+
+/** 标准化搜索结果（去重、截断） */
+function normalizeSearchResults(
+  raw: { title: string; url: string; content: string; score?: number }[],
+  maxResults: number
+) {
+  const seen = new Set<string>()
+  const results = raw
+    .filter((r) => {
+      const key = r.url?.replace(/\/+$/, '')
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .slice(0, maxResults)
+    .map((r) => ({
+      title: (r.title || '').slice(0, 120),
+      url: r.url || '',
+      snippet: (r.content || '').slice(0, 500),
+      source: safeDomain(r.url),
+      score: r.score,
+    }))
+
+  return { ok: true, results }
+}
+
+/** Tavily 搜索 */
+async function searchTavily(query: string, apiKey: string, maxResults: number, timeout: number) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeout)
+  try {
+    const resp = await fetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: apiKey,
+        query,
+        max_results: maxResults,
+        search_depth: 'basic',
+        include_answer: true,
+      }),
+      signal: controller.signal,
+    })
+    clearTimeout(timer)
+
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '')
+      return { ok: false, results: [], message: `Tavily 错误 (HTTP ${resp.status})：${body.slice(0, 200)}` }
+    }
+
+    const data = await resp.json() as {
+      results?: { title: string; url: string; content: string; score?: number }[]
+    }
+
+    const seen = new Set<string>()
+    const results = (data.results || [])
+      .filter((r) => {
+        const key = r.url?.replace(/\/+$/, '')
+        if (!key || seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      .slice(0, maxResults)
+      .map((r) => ({
+        title: (r.title || '').slice(0, 120),
+        url: r.url || '',
+        snippet: (r.content || '').slice(0, 500),
+        source: safeDomain(r.url),
+        score: r.score,
+      }))
+
+    return { ok: true, results }
+  } catch (err: any) {
+    clearTimeout(timer)
+    if (err?.name === 'AbortError') return { ok: false, results: [], message: '搜索超时' }
+    return { ok: false, results: [], message: `搜索失败：${err?.message || String(err)}` }
+  }
+}
+
+function safeDomain(url: string): string {
+  try { return new URL(url).hostname } catch { return '' }
+}
+
+// ── Whisper 语音转写 ──
+ipcMain.handle('whisper:transcribe', async (_, params: { audio: string; language?: string }) => {
+  try {
+    const { transcribeAudio } = await import('./services/whisper/WhisperService')
+    // audio 是 base64 编码的 WAV 数据
+    const wavBuffer = Buffer.from(params.audio, 'base64')
+    return await transcribeAudio(wavBuffer, params.language || 'zh')
+  } catch (err: any) {
+    return { ok: false, text: '', message: `Whisper 转写失败：${err?.message || String(err)}` }
+  }
+})
 
 function registerShortcuts(): void {
   globalShortcut.register('Alt+Space', () => {
@@ -457,7 +704,12 @@ app.whenReady().then(() => {
     : join(process.resourcesPath, 'models')
   protocol.handle('app', (request) => {
     const url = new URL(request.url)
-    const filePath = join(modelsDir, decodeURIComponent(url.pathname))
+    // 规范化并校验路径，防止 ../ 穿越出 models 目录
+    const requested = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, '')
+    const filePath = join(modelsDir, requested)
+    if (!filePath.startsWith(modelsDir + sep) && filePath !== modelsDir) {
+      return new Response('forbidden', { status: 403 })
+    }
     // vosk-browser 需要下载 tar.gz 归档：显式提供 Content-Length / gzip MIME
     if (filePath.endsWith('.tar.gz')) {
       try {

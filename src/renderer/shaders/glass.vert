@@ -1,16 +1,9 @@
-varying vec2 vUv;
-varying vec3 vNormal;
-varying vec3 vWorldPos;
-varying vec3 vViewDir;
+// 全屏 quad 顶点着色器
+attribute vec2 aPosition;
+attribute vec2 aTexCoord;
+varying vec2 vUV;
 
 void main() {
-    vec4 worldPos = modelMatrix * vec4(position, 1.0);
-    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-
-    vUv = uv;
-    vNormal = normalize(mat3(modelMatrix) * normal);
-    vWorldPos = worldPos.xyz;
-    vViewDir = normalize(cameraPosition - worldPos.xyz);
-
-    gl_Position = projectionMatrix * mvPosition;
+  vUV = aTexCoord;
+  gl_Position = vec4(aPosition, 0.0, 1.0);
 }

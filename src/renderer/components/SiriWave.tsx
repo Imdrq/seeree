@@ -112,8 +112,18 @@ export default function SiriWave({ volumeRef, listening, speaking = false, width
     ctx.scale(dpr, dpr)
 
     let t = 0, smoothVol = 0, raf = 0
+    let lastDraw = 0
+    const active = listening || speaking
 
-    function draw() {
+    function draw(now: number) {
+      // 空闲时降到 ~10fps，节省 CPU；活跃时保持 60fps
+      const minInterval = active ? 0 : 100
+      if (now - lastDraw < minInterval) {
+        raf = requestAnimationFrame(draw)
+        return
+      }
+      lastDraw = now
+
       const w = width, h = height
       const cy = h / 2
       const halfR = h / 2

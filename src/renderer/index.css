@@ -16,6 +16,9 @@ body,
   user-select: none;
   -webkit-user-select: none;
   -webkit-app-region: drag;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 /* 滚动条（设置面板内容超出时可滚动且美观） */

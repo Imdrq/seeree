@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useAIConfig } from '../hooks/useAIConfig'
+import { useAIConfig, THEME_COLORS } from '../hooks/useAIConfig'
 import type { AIConfig } from '../hooks/useAIConfig'
 import LiquidGlassCanvas from './LiquidGlassCanvas'
 
@@ -14,7 +14,7 @@ const providerLabels: Record<AIConfig['provider'], string> = {
 
 const isOllama = (p: AIConfig['provider']) => p === 'ollama'
 
-type SectionKey = 'api' | 'network' | 'other'
+type SectionKey = 'api' | 'network' | 'personal' | 'other'
 
 interface NavItem {
   key: SectionKey
@@ -55,9 +55,19 @@ function IconOther() {
   )
 }
 
+function IconPersonal() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+    </svg>
+  )
+}
+
 const NAV_ITEMS: NavItem[] = [
   { key: 'api', label: 'API 连接', icon: <IconAPI /> },
   { key: 'network', label: '联网设置', icon: <IconNetwork /> },
+  { key: 'personal', label: '个性化', icon: <IconPersonal /> },
   { key: 'other', label: '其他设置', icon: <IconOther /> },
 ]
 
@@ -66,7 +76,7 @@ const NAV_ITEMS: NavItem[] = [
 export default function ControlPanel({ onClose }: { onClose: () => void }): JSX.Element {
   const {
     config, updateConfig, saveConfig, testConnection, models,
-    ollamaLoading, ollamaError, refreshOllamaModels,
+    ollamaLoading, ollamaError, refreshOllamaModels, theme,
   } = useAIConfig()
   const [activeSection, setActiveSection] = useState<SectionKey>('api')
   const [saved, setSaved] = useState(false)
@@ -105,14 +115,22 @@ export default function ControlPanel({ onClose }: { onClose: () => void }): JSX.
 
   return (
     <div style={outerStyle}>
-      <div style={roundedShell}>
+      <div style={{
+        ...roundedShell,
+        background: THEME_COLORS[theme].settingsBg,
+        ['--sidebar-bg' as any]: theme === 'obsidian' ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.08)',
+        ['--card-bg' as any]: theme === 'obsidian' ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.05)',
+        ['--divider' as any]: theme === 'obsidian' ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.05)',
+      } as any}>
         {/* WebGL Liquid Glass 玻璃着色器 */}
         <LiquidGlassCanvas
           width={680}
           height={480}
           radius={0}
-          tintAmount={0.10}
-          saturation={1.12}
+          tintAmount={theme === 'obsidian' ? 0.02 : 0.10}
+          saturation={theme === 'obsidian' ? 1.0 : 1.12}
+          colorA={theme === 'obsidian' ? [0.02, 0.02, 0.02] : [0.05, 0.05, 0.11]}
+          colorB={theme === 'obsidian' ? [0.03, 0.03, 0.03] : [0.07, 0.06, 0.15]}
         />
         {/* ═══ 标题栏 ═══ */}
         <div style={{ ...titleBarStyle, WebkitAppRegion: 'drag', position: 'relative', zIndex: 2 } as any}>
@@ -153,7 +171,7 @@ export default function ControlPanel({ onClose }: { onClose: () => void }): JSX.
               })}
             </div>
             <div style={sidebarFooter}>
-              <span style={versionText}>Seeree 0.0.2</span>
+              <span style={versionText}>Seeree 0.1.1</span>
             </div>
           </nav>
 
@@ -176,6 +194,7 @@ export default function ControlPanel({ onClose }: { onClose: () => void }): JSX.
               />
             )}
             {activeSection === 'network' && <NetworkSection />}
+            {activeSection === 'personal' && <PersonalSection />}
             {activeSection === 'other' && <OtherSection />}
           </main>
         </div>
@@ -453,9 +472,11 @@ function NetworkSection() {
   )
 }
 
-/* ═══════════ 其他设置 ═══════════ */
+/* ═══════════ 个性化 ═══════════ */
 
-function OtherSection() {
+function PersonalSection() {
+  const { inputHotkey, updateInputHotkey, voiceHotkey, updateVoiceHotkey, theme, updateTheme } = useAIConfig()
+  const [recording, setRecording] = useState<'input' | 'voice' | null>(null)
   const [lockResponse, setLockResponse] = useState(() => {
     try { return localStorage.getItem('seeree-lock-response') !== '0' } catch { return true }
   })
@@ -465,9 +486,102 @@ function OtherSection() {
     localStorage.setItem('seeree-lock-response', next ? '1' : '0')
   }
 
+  // 录制快捷键
+  useEffect(() => {
+    if (!recording) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.key === 'Escape') { setRecording(null); return }
+      const parts: string[] = []
+      if (e.ctrlKey) parts.push('Ctrl')
+      if (e.altKey) parts.push('Alt')
+      if (e.shiftKey) parts.push('Shift')
+      if (e.metaKey) parts.push('Super')
+      const key = e.key
+      if (!['Control', 'Alt', 'Shift', 'Meta'].includes(key)) {
+        parts.push(key.length === 1 ? key.toUpperCase() : key)
+        const combo = parts.join('+')
+        if (recording === 'input') updateInputHotkey(combo)
+        else if (recording === 'voice') updateVoiceHotkey(combo)
+        setRecording(null)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [recording, updateInputHotkey, updateVoiceHotkey])
+
   return (
     <>
-      <PageHeader title="其他设置" subtitle="应用与关于" />
+      <PageHeader title="个性化" subtitle="交互与快捷键" />
+
+      <GroupHeader>快捷键</GroupHeader>
+      <Group>
+        <Row label="输入面板快捷键">
+          <button
+            onClick={() => setRecording('input')}
+            style={{
+              padding: '5px 16px', borderRadius: 6,
+              border: `1px solid ${recording === 'input' ? 'rgba(255,180,50,0.5)' : 'rgba(255,255,255,0.12)'}`,
+              background: recording === 'input' ? 'rgba(255,180,50,0.15)' : 'rgba(255,255,255,0.06)',
+              color: recording === 'input' ? 'rgba(255,180,50,0.9)' : 'rgba(255,255,255,0.7)',
+              fontSize: 12, fontWeight: 500, cursor: 'pointer', outline: 'none',
+              fontFamily: 'monospace', minWidth: 100,
+            }}
+          >
+            {recording === 'input' ? '请按快捷键…' : inputHotkey}
+          </button>
+        </Row>
+        <RowDivider />
+        <Row label="语音输入快捷键">
+          <button
+            onClick={() => setRecording('voice')}
+            style={{
+              padding: '5px 16px', borderRadius: 6,
+              border: `1px solid ${recording === 'voice' ? 'rgba(255,180,50,0.5)' : 'rgba(255,255,255,0.12)'}`,
+              background: recording === 'voice' ? 'rgba(255,180,50,0.15)' : 'rgba(255,255,255,0.06)',
+              color: recording === 'voice' ? 'rgba(255,180,50,0.9)' : 'rgba(255,255,255,0.7)',
+              fontSize: 12, fontWeight: 500, cursor: 'pointer', outline: 'none',
+              fontFamily: 'monospace', minWidth: 100,
+            }}
+          >
+            {recording === 'voice' ? '请按快捷键…' : voiceHotkey}
+          </button>
+        </Row>
+      </Group>
+      <GroupFooter>
+        {recording
+          ? '按下想要的快捷键组合（如 Ctrl+Shift+I），按 Esc 取消'
+          : '点击按钮可重新录制。输入快捷键打开打字面板，语音快捷键启动语音对话'}
+      </GroupFooter>
+
+      <GroupHeader>主题</GroupHeader>
+      <Group>
+        <Row label="界面主题">
+          <div style={{ display: 'flex', gap: 8 }}>
+            {([
+              { key: 'purple-blue' as const, label: '紫蓝色', preview: 'linear-gradient(135deg, #1a0a2e 0%, #0e0e1a 100%)' },
+              { key: 'obsidian' as const, label: '黑曜石', preview: 'linear-gradient(135deg, #1a1a1a 0%, #0a0a0a 100%)' },
+            ]).map((t) => (
+              <button
+                key={t.key}
+                onClick={() => updateTheme(t.key)}
+                style={{
+                  padding: '8px 18px', borderRadius: 8,
+                  border: `1px solid ${theme === t.key ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.1)'}`,
+                  background: t.preview,
+                  color: theme === t.key ? '#ffffff' : 'rgba(255,255,255,0.5)',
+                  fontSize: 12, fontWeight: 500, cursor: 'pointer', outline: 'none',
+                  transition: 'all 0.15s ease',
+                } as any}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </Row>
+      </Group>
+      <GroupFooter>黑曜石模式下，气泡、输入面板和设置界面全部变为黑色调</GroupFooter>
 
       <GroupHeader>交互</GroupHeader>
       <Group>
@@ -486,12 +600,22 @@ function OtherSection() {
           </button>
         </Row>
       </Group>
-      <GroupFooter>开启后，AI 回答期间点击或按 Ctrl+T 不会中断回答</GroupFooter>
+      <GroupFooter>开启后，AI 回答期间点击或按快捷键不会中断回答</GroupFooter>
+    </>
+  )
+}
+
+/* ═══════════ 其他设置 ═══════════ */
+
+function OtherSection() {
+  return (
+    <>
+      <PageHeader title="其他设置" subtitle="应用与关于" />
 
       <GroupHeader>应用</GroupHeader>
       <Group>
         <Row label="版本">
-          <span style={valueText}>0.0.2</span>
+          <span style={valueText}>0.1.1</span>
         </Row>
         <RowDivider />
         <Row label="作者">
@@ -616,7 +740,7 @@ const sidebarStyle: any = {
   width: 200, flexShrink: 0,
   display: 'flex', flexDirection: 'column',
   padding: '24px 14px 18px',
-  background: 'rgba(255,255,255,0.08)',
+  background: 'var(--sidebar-bg, rgba(255,255,255,0.08))',
   boxSizing: 'border-box',
 }
 
@@ -644,7 +768,7 @@ const navItem: any = {
 
 const sidebarFooter: React.CSSProperties = {
   marginTop: 'auto', padding: '14px 12px 0',
-  borderTop: '1px solid rgba(255,255,255,0.05)',
+  borderTop: '1px solid var(--divider, rgba(255,255,255,0.05))',
 }
 
 const versionText: React.CSSProperties = {
@@ -682,7 +806,7 @@ const groupHeader: React.CSSProperties = {
 
 const groupCard: React.CSSProperties = {
   borderRadius: 12,
-  background: 'rgba(255,255,255,0.05)',
+  background: 'var(--card-bg, rgba(255,255,255,0.05))',
   overflow: 'hidden',
 }
 

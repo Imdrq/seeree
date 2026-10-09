@@ -20,6 +20,11 @@ interface ElectronAPI {
   closeSettings: () => Promise<void>
   resizeForSettings: () => Promise<void>
   resizeForBubble: () => Promise<void>
+  resizeForOnboarding: () => Promise<void>
+  resizeForInput: () => Promise<void>
+  updateHotkey: (hotkey: string) => Promise<{ ok: boolean; message?: string }>
+  updateVoiceHotkey: (hotkey: string) => Promise<{ ok: boolean; message?: string }>
+  onToggleVoiceInput: (callback: () => void) => () => void
   quitApp: () => Promise<void>
   testConnection: (params: { provider: string; model: string; apiKey: string; baseUrl: string }) => Promise<TestResult>
   listOllamaModels: (baseUrl: string) => Promise<OllamaModelsResult>
@@ -53,6 +58,7 @@ interface ElectronAPI {
     text: string
     message?: string
   }>
+  onToggleInputPanel: (callback: () => void) => () => void
 }
 
 interface Window {

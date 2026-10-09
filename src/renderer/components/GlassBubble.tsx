@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import SiriWave from './SiriWave'
 import useWhisperRecognition from './useWhisperRecognition'
 import { useMicrophone } from './useMicrophone'
-import { useAIConfig } from '../hooks/useAIConfig'
+import { useAIConfig, THEME_COLORS } from '../hooks/useAIConfig'
 
 const W = 320
 const H = 180
@@ -235,6 +235,21 @@ function needsSearch(text: string): boolean {
   return SEARCH_TRIGGERS.some((kw) => text.includes(kw))
 }
 
+/** 构建系统提示词（注入当前时间） */
+function buildSystemPrompt(text: string): string {
+  const now = new Date()
+  const timeStr = now.toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', weekday: 'long',
+  })
+  const timeContext = `当前时间：${timeStr}。`
+  const greet = /你好|您好|hi|hello|哈喽|hey/i.test(text)
+  const base = greet
+    ? `你是 Seeree 桌面语音助手，由 Ricky 制作。${timeContext}请用中文简洁实用地回答用户问题。当用户向你问好或询问你是谁时，可以简短地介绍自己是 Seeree 语音助手。不要使用任何表情符号、emoji、颜文字或特殊图形符号。`
+    : `你是 Seeree 桌面语音助手，由 Ricky 制作。${timeContext}请用中文简洁实用地回答用户问题。不要在回答中自我介绍、提及你的名字或开发者。不要使用任何表情符号、emoji、颜文字或特殊图形符号。`
+  return base + '重要：如果用户询问天气、新闻、股价、比赛结果、实时资讯等需要联网获取的信息，你必须直接根据搜索结果回答，绝对不要反问用户"要不要搜索"、"需要我帮你查吗"或类似问题。搜索已经自动完成，你只需根据提供的搜索结果给出答案。如果搜索结果中没有相关信息，直接说明没有查到即可。'
+}
+
 /* ═══════════ 会话结束指令 ═══════════ */
 
 /** 说"结束/退出/再见"等 → 退出连续对话循环 */
@@ -289,13 +304,18 @@ async function correctHomophones(
 
 /* ═══════════ 组件 ═══════════ */
 
-type Status = 'idle' | 'listening' | 'processing' | 'speaking'
+type Status = 'idle' | 'editing' | 'listening' | 'processing' | 'speaking'
+
+// 形变参数
+const IDLE_W = 320, IDLE_H = 180, IDLE_R = 90
+const EDIT_W = 420, EDIT_H = 220, EDIT_R = 24
+const MORPH_EASE = 'cubic-bezier(0.34, 1.56, 0.64, 1)' // spring overshoot
 
 export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => void }): JSX.Element {
   const { volumeRef, start: micStart, stop: micStop } = useMicrophone()
   const { recognize } = useWhisperRecognition()
-  const { config, isConfigured, searchConfig } = useAIConfig()
-  const pillRadius = H / 2
+  const { config, isConfigured, searchConfig, inputHotkey, theme } = useAIConfig()
+  const colors = THEME_COLORS[theme]
   const abortRef = useRef(false)
   /** 连续会话激活：按一次 Ctrl+T 后，回答完不进入休眠，接着听下一句 */
   const sessionActiveRef = useRef(false)
@@ -307,6 +327,10 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
   const [status, setStatus] = useState<Status>('idle')
   const [statusText, setStatusText] = useState('')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  // ── Liquid Glass 形变输入面板 ──
+  const [inputValue, setInputValue] = useState('')
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const isEditing = status === 'editing'
   // Ctrl+T 触发说话：按下时玻璃球亮度提升 1.5%
   const [keyHeld, setKeyHeld] = useState(false)
   /** 会话循环正在运行（同步互斥锁，防止双击/快捷键并发触发双会话） */
@@ -346,6 +370,132 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
     }
   }, [])
 
+  /* ─── Liquid Glass 输入面板 ─── */
+
+  /** 展开/收起输入面板 */
+  const toggleInputPanel = useCallback(() => {
+    if (status === 'editing') {
+      // 再按一次快捷键 → 退出输入模式
+      setInputValue('')
+      setStatus('idle')
+      setStatusText('')
+      return
+    }
+    if (status === 'processing' || status === 'speaking') {
+      if (lockDuringResponse) return
+      abortRef.current = true
+      sessionActiveRef.current = false
+      micStop()
+      window.speechSynthesis.cancel()
+      window.electronAPI?.abortChat?.()
+    }
+    if (status === 'listening') {
+      abortRef.current = true
+      sessionActiveRef.current = false
+      micStop()
+    }
+    setStatus('editing')
+    setStatusText('')
+    setErrorMsg(null)
+    setInputValue('')
+    // 视觉反馈：短暂提亮
+    setKeyHeld(true)
+    setTimeout(() => setKeyHeld(false), 300)
+    // 自动 focus
+    setTimeout(() => textareaRef.current?.focus(), 80)
+  }, [status, lockDuringResponse, micStop])
+
+  /** 提交文本 → 走现有 chat 管线 */
+  const handleSubmitText = useCallback(async () => {
+    const text = inputValue.trim()
+    if (!text) return
+    // 收起面板
+    setInputValue('')
+    setStatus('idle')
+    setStatusText('')
+
+    // 复用 handleToggle 的 chat 逻辑：直接启动语音 session 循环并注入文本
+    // 为了 MVP 简洁，这里直接走一轮 chat
+    if (!isConfigured) {
+      setErrorMsg('未配置 AI')
+      setTimeout(() => setErrorMsg(null), 3000)
+      return
+    }
+    setStatus('processing')
+    try {
+      // 搜索
+      let searchContext = ''
+      const searchReady = searchConfig.enabled && (
+        searchConfig.provider === 'searxng'
+          ? !!searchConfig.instanceUrl
+          : !!searchConfig.apiKey
+      )
+      if (needsSearch(text) && searchReady) {
+        try {
+          setStatusText('正在搜索...')
+          const sr = await window.electronAPI!.webSearch({
+            query: text,
+            provider: searchConfig.provider,
+            apiKey: searchConfig.apiKey,
+            instanceUrl: searchConfig.instanceUrl,
+            maxResults: 5,
+            timeout: searchConfig.timeout,
+          })
+          if (sr.ok && sr.results.length > 0) {
+            searchContext = sr.results.map((r, i) =>
+              `[${i + 1}] ${r.title} | ${r.source || ''} | ${r.snippet}`
+            ).join('\n')
+          }
+        } catch { /* 搜索失败不阻断 */ }
+      }
+
+      setStatusText('')
+      const systemPrompt = buildSystemPrompt(text)
+
+      const userMessage = searchContext
+        ? `以下是已自动完成的网络搜索结果，请直接据此回答用户问题并标注来源编号，不要反问是否需要搜索：\n${searchContext}\n\n用户问题：${text}`
+        : text
+
+      const reply = await window.electronAPI!.chatCompletion({
+        provider: config.provider,
+        apiKey: config.apiKey,
+        model: config.model,
+        baseUrl: config.baseUrl,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMessage },
+        ],
+      })
+
+      if (!reply) {
+        setErrorMsg('AI 未返回内容')
+        setTimeout(() => setErrorMsg(null), 3000)
+        setStatus('idle')
+        return
+      }
+
+      const clean = stripEmoji(reply)
+      if (!clean) {
+        setErrorMsg('AI 返回内容为空')
+        setTimeout(() => setErrorMsg(null), 3000)
+        setStatus('idle')
+        return
+      }
+
+      lastSpokenRef.current = clean
+      setSpeechText(clean)
+      setReadIndex(0)
+      setStatus('speaking')
+      await speakText(clean, (i) => setReadIndex(i))
+      setSpeechText(null)
+      setReadIndex(0)
+    } catch (err: any) {
+      setErrorMsg(err?.message || '回答失败')
+      setTimeout(() => setErrorMsg(null), 3000)
+    }
+    setStatus('idle')
+  }, [inputValue, isConfigured, searchConfig, config])
+
   /* 朗读字幕：全文 + 已读字符数 */
   const [speechText, setSpeechText] = useState<string | null>(null)
   const [readIndex, setReadIndex] = useState(0)
@@ -362,6 +512,21 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
     if (curRect.top < wrapRect.top) wrap.scrollTop -= wrapRect.top - curRect.top
     else if (curRect.bottom > wrapRect.bottom) wrap.scrollTop += curRect.bottom - wrapRect.bottom
   }, [readIndex, speechText])
+
+  // 快捷键触发输入面板（主进程 globalShortcut → IPC）
+  useEffect(() => {
+    const unsub = window.electronAPI?.onToggleInputPanel?.(() => {
+      toggleInputPanel()
+    })
+    return () => { unsub?.() }
+  }, [toggleInputPanel])
+
+  // 退出输入模式时 blur textarea，防止残留键盘输入
+  useEffect(() => {
+    if (!isEditing) {
+      textareaRef.current?.blur()
+    }
+  }, [isEditing])
 
   /* ─── 主流程（连续会话：听 → 处理 → 回答完接着听） ─── */
   const handleToggle = useCallback(async () => {
@@ -591,12 +756,10 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
       }
 
       try {
-        const systemPrompt = /你好|您好|hi|hello|哈喽|hey/i.test(text)
-          ? '你是 Seeree 桌面语音助手，由 Ricky 制作。请用中文简洁实用地回答用户问题。当用户向你问好或询问你是谁时，可以简短地介绍自己是 Seeree 语音助手。不要使用任何表情符号、emoji、颜文字或特殊图形符号。'
-          : '你是 Seeree 桌面语音助手，由 Ricky 制作。请用中文简洁实用地回答用户问题。不要在回答中自我介绍、提及你的名字或开发者。不要使用任何表情符号、emoji、颜文字或特殊图形符号。'
+        const systemPrompt = buildSystemPrompt(text)
 
         const userMessage = searchContext
-          ? `以下是网络搜索结果（请据此回答并标注来源编号）：\n${searchContext}\n\n用户问题：${text}`
+          ? `以下是已自动完成的网络搜索结果，请直接据此回答用户问题并标注来源编号，不要反问是否需要搜索：\n${searchContext}\n\n用户问题：${text}`
           : text
 
         const reply = await window.electronAPI!.chatCompletion({
@@ -665,7 +828,13 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
     setReadIndex(0)
   }, [status, config, isConfigured, searchConfig, lockDuringResponse, micStart, micStop, resetIdleTimer, clearIdleTimer])
 
-
+  // 语音输入快捷键（须在 handleToggle 定义之后，否则依赖数组触发 TDZ 崩溃）
+  useEffect(() => {
+    const unsub = window.electronAPI?.onToggleVoiceInput?.(() => {
+      handleToggle()
+    })
+    return () => { unsub?.() }
+  }, [handleToggle])
 
   /* ─── 键盘快捷键 ─── */
   // 取消/结束当前会话（Esc 触发）
@@ -684,6 +853,7 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
     setErrorMsg(null)
     setSpeechText(null)
     setReadIndex(0)
+    setInputValue('')
   }, [micStop, clearIdleTimer])
 
   // 窗口失焦 / 隐藏时自动取消会话（防止后台继续听和回答）
@@ -713,28 +883,29 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
   }, [cancelSession, status])
 
   useEffect(() => {
-    // 是否在输入框内（Ctrl+T 不干扰打字）
+    // 是否在输入框内（快捷键不干扰打字）
     const inField = (t: EventTarget | null) =>
       t instanceof HTMLElement && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (inField(e.target)) return
+      if (inField(e.target)) {
+        // 在输入框内：只处理 Escape 退出 editing
+        if (e.key === 'Escape' && status === 'editing') {
+          e.preventDefault()
+          setInputValue('')
+          setStatus('idle')
+          setStatusText('')
+        }
+        return
+      }
       if (e.key === 'Escape') {
         cancelSession()
         return
       }
-      // Ctrl+T 触发说话（忽略按键自动重复）
-      if (e.ctrlKey && (e.key === 't' || e.key === 'T')) {
-        e.preventDefault()
-        if (e.repeat) return
-        setKeyHeld(true)
-        // idle → 开始；listening/processing/speaking → 取消
-        handleToggle()
-      }
     }
 
     const onKeyUp = (e: KeyboardEvent) => {
-      // 松开 Ctrl 或 T：仅复位亮度，不取消会话（取消只能通过点击）
+      // 松开快捷键：仅复位亮度
       if (e.key === 'Control' || e.key === 't' || e.key === 'T') {
         setKeyHeld(false)
       }
@@ -747,18 +918,20 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
       window.removeEventListener('keyup', onKeyUp)
       setKeyHeld(false)
     }
-  }, [cancelSession, status, handleToggle])
+  }, [cancelSession, status])
 
   /* ─── 状态标签内容 ─── */
   const labelText = errorMsg
     || statusText
-    || (status === 'listening' ? '聆听中...'
+    || (status === 'editing' ? '输入内容后按 Enter 发送'
+    : status === 'listening' ? '聆听中...'
     : status === 'processing' ? '正在回答...'
     : status === 'speaking' ? '播报中...'
-    : '按 Ctrl+T 或点击开始')
+    : `按 ${inputHotkey} 或点击开始`)
 
   const labelColor = errorMsg
     ? 'rgba(255,100,100,0.75)'
+    : status === 'editing' ? 'rgba(255,255,255,0.35)'
     : status === 'listening' ? 'rgba(99,200,255,0.55)'
     : status === 'processing' ? 'rgba(255,200,80,0.55)'
     : status === 'speaking' ? 'rgba(100,255,180,0.55)'
@@ -767,8 +940,8 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
   return (
     <div
       style={{
-        width: 360,
-        height: 216,
+        width: '100%',
+        height: '100%',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -778,29 +951,42 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
         boxSizing: 'border-box',
         WebkitAppRegion: 'drag',
       } as any}>
-        {/* ═══════════ 泡泡主体 ═══════════ */}
+        {/* ═══════════ 气泡簇：气泡 + 紧贴的设置按钮 ═══════════ */}
+        <div style={{
+          position: 'relative',
+          width: isEditing ? EDIT_W : IDLE_W,
+          height: isEditing ? EDIT_H : IDLE_H,
+          flexShrink: 0,
+          transition: `width 0.45s ${MORPH_EASE}, height 0.45s ${MORPH_EASE}`,
+        }}>
+          {/* 泡泡主体（形变容器） */}
           <div
-            onClick={handleToggle}
+            onClick={isEditing ? undefined : handleToggle}
             title={
-              status === 'idle'
-                ? '按 Ctrl+T 或点击开始语音对话 (Esc 取消)'
-                : '点击取消'
+              isEditing
+                ? '输入内容后按 Enter 发送，Esc 取消'
+                : status === 'idle'
+                  ? '点击或按快捷键开始 (Esc 取消)'
+                  : '点击取消'
             }
             style={{
-              width: W, height: H,
-              borderRadius: pillRadius,
+              width: '100%',
+              height: '100%',
+              borderRadius: isEditing ? EDIT_R : IDLE_R,
               position: 'relative',
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
+              justifyContent: isEditing ? 'flex-start' : 'center',
+              cursor: isEditing ? 'text' : 'pointer',
               overflow: 'hidden',
               WebkitAppRegion: 'no-drag',
               background:
-                status !== 'idle'
-                  ? 'rgba(20,10,40,0.5)'
-                  : 'rgba(20,10,40,0.35)',
+                isEditing
+                  ? colors.inputBg
+                  : status !== 'idle'
+                    ? colors.bubbleBgActive
+                    : colors.bubbleBg,
               backdropFilter: `blur(24px) brightness(${keyHeld ? 0.964 : 0.95})`,
               WebkitBackdropFilter: `blur(24px) brightness(${keyHeld ? 0.964 : 0.95})`,
               zIndex: 1,
@@ -810,27 +996,112 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
                 '0 4px 30px rgba(0,0,0,0.3)',
               ].join(', '),
               border: '1px solid rgba(255,255,255,0.1)',
-              transition: 'background 0.3s ease, backdrop-filter 0.15s ease',
+              transition: [
+                `border-radius 0.45s ${MORPH_EASE}`,
+                'background 0.3s ease',
+                'backdrop-filter 0.15s ease',
+              ].join(', '),
             } as any}
           >
             {/* 内表面径向渐变 */}
             <div style={{
               position: 'absolute', inset: 0,
-              borderRadius: pillRadius,
+              borderRadius: isEditing ? EDIT_R : IDLE_R,
               background: `radial-gradient(ellipse 65% 42% at 36% 30%,
                 rgba(255,255,255,0.1) 0%, transparent 50%)`,
               pointerEvents: 'none',
+              transition: `border-radius 0.45s ${MORPH_EASE}`,
             }} />
 
-            {/* SiriWave */}
-            <div style={{ position: 'relative', zIndex: 2 }}>
-              <SiriWave
-                volumeRef={volumeRef}
-                listening={status !== 'idle'}
-                speaking={status === 'speaking'}
-                width={W}
-                height={H}
+            {/* SiriWave（editing 时隐藏） */}
+            {!isEditing && (
+              <div style={{ position: 'relative', zIndex: 2 }}>
+                <SiriWave
+                  volumeRef={volumeRef}
+                  listening={status !== 'idle'}
+                  speaking={status === 'speaking'}
+                  width={W}
+                  height={H}
+                />
+              </div>
+            )}
+
+            {/* ═══════ 形变输入内容层（editing） ═══════ */}
+            <div style={{
+              position: 'absolute', inset: 0,
+              zIndex: 10,
+              display: 'flex', flexDirection: 'column',
+              padding: '18px 20px 14px',
+              opacity: isEditing ? 1 : 0,
+              visibility: isEditing ? 'visible' : 'hidden',
+              pointerEvents: isEditing ? 'auto' : 'none',
+              transition: `opacity 0.25s ease ${isEditing ? '80ms' : '0ms'}`,
+            } as any}>
+              <textarea
+                ref={textareaRef}
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    handleSubmitText()
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault()
+                    setInputValue('')
+                    setStatus('idle')
+                    setStatusText('')
+                  }
+                }}
+                placeholder="输入内容…"
+                style={{
+                  flex: 1,
+                  width: '100%',
+                  background: 'transparent',
+                  border: 'none',
+                  outline: 'none',
+                  resize: 'none',
+                  color: '#ffffff',
+                  fontSize: 15,
+                  lineHeight: 1.5,
+                  fontFamily: 'inherit',
+                  overflowY: 'auto',
+                  caretColor: '#ffffff',
+                } as any}
               />
+              {/* 操作栏 */}
+              <div style={{
+                display: 'flex', justifyContent: 'flex-end', alignItems: 'center',
+                gap: 8, paddingTop: 8, marginTop: 4,
+                borderTop: '1px solid rgba(255,255,255,0.06)',
+              }}>
+                <button
+                  onClick={() => { setInputValue(''); setStatus('idle'); setStatusText('') }}
+                  style={{
+                    padding: '5px 14px', borderRadius: 8,
+                    border: '1px solid rgba(255,255,255,0.15)',
+                    background: 'rgba(255,255,255,0.08)',
+                    color: 'rgba(255,255,255,0.6)',
+                    fontSize: 12, cursor: 'pointer', outline: 'none',
+                    transition: 'all 0.15s ease',
+                  } as any}
+                >
+                  Esc
+                </button>
+                <button
+                  onClick={handleSubmitText}
+                  style={{
+                    padding: '5px 18px', borderRadius: 8,
+                    border: '1px solid rgba(255,255,255,0.25)',
+                    background: 'rgba(255,255,255,0.15)',
+                    color: '#ffffff',
+                    fontSize: 12, fontWeight: 500, cursor: 'pointer', outline: 'none',
+                    transition: 'all 0.15s ease',
+                  } as any}
+                >
+                  发送 ↵
+                </button>
+              </div>
             </div>
 
             {/* ═══════ 表面反射 ═══════ */}
@@ -838,12 +1109,13 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
             {/* 顶部高光弧 */}
             <div style={{
               position: 'absolute', top: 0, left: 10, right: 10, height: '40%',
-              borderRadius: `${pillRadius - 4}px ${pillRadius - 4}px 0 0`,
+              borderRadius: `${isEditing ? EDIT_R - 4 : IDLE_R - 4}px ${isEditing ? EDIT_R - 4 : IDLE_R - 4}px 0 0`,
               background: `linear-gradient(180deg,
                 rgba(255,255,255,0.18) 0%,
                 rgba(255,255,255,0.05) 35%,
                 transparent 100%)`,
               pointerEvents: 'none', zIndex: 3,
+              transition: `border-radius 0.45s ${MORPH_EASE}`,
             }} />
 
             {/* 高光斑 */}
@@ -860,14 +1132,15 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
             {/* 底部折射暗晕 */}
             <div style={{
               position: 'absolute', bottom: 0, left: 6, right: 6, height: '32%',
-              borderRadius: `0 0 ${pillRadius - 4}px ${pillRadius - 4}px`,
+              borderRadius: `0 0 ${isEditing ? EDIT_R - 4 : IDLE_R - 4}px ${isEditing ? EDIT_R - 4 : IDLE_R - 4}px`,
               background: `linear-gradient(0deg,
                 rgba(10,5,30,0.15) 0%, transparent 100%)`,
               pointerEvents: 'none', zIndex: 2,
+              transition: `border-radius 0.45s ${MORPH_EASE}`,
             }} />
 
-            {/* 底部信息区：朗读字幕 或 状态标签 */}
-            {speechText !== null && status === 'speaking' ? (
+            {/* 底部信息区：朗读字幕 或 状态标签（editing 时隐藏） */}
+            {!isEditing && (speechText !== null && status === 'speaking' ? (
               <div
                 ref={subtitleWrapRef}
                 style={{
@@ -918,26 +1191,27 @@ export default function GlassBubble({ onOpenSettings }: { onOpenSettings: () => 
                   {labelText}
                 </span>
               </div>
-            )}
+            ))}
           </div>
 
-        {/* ═══════════ ⚙ 设置按钮 ═══════════ */}
-        <button
-          onClick={(e) => {
-            e.preventDefault()
-            e.stopPropagation()
-            onOpenSettings()
-          }}
-          title="AI 设置"
-          style={gearBtnStyle}
-        >
-          <GearIcon />
-        </button>
+          {/* ═══════════ ⚙ 设置按钮（贴在气泡右上角） ═══════════ */}
+          <button
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              onOpenSettings()
+            }}
+            title="AI 设置"
+            style={gearBtnStyle}
+          >
+            <GearIcon />
+          </button>
 
-        {/* ═══════════ AI 未配置提示 ═══════════ */}
-        {!isConfigured && status === 'idle' && (
-          <div style={keyHintStyle}>未配置 AI · 点击可测试语音</div>
-        )}
+          {/* ═══════════ AI 未配置提示（气泡下方） ═══════════ */}
+          {!isConfigured && status === 'idle' && (
+            <div style={keyHintStyle}>未配置 AI · 点击可测试语音</div>
+          )}
+        </div>
       </div>
   )
 }
@@ -958,8 +1232,9 @@ function GearIcon() {
 
 const gearBtnStyle: any = {
   position: 'absolute',
-  top: 12,
-  right: 12,
+  // 贴在气泡右上角外侧，随气泡形变一起移动
+  top: -10,
+  right: -10,
   width: 30,
   height: 30,
   borderRadius: 8,
@@ -977,9 +1252,16 @@ const gearBtnStyle: any = {
 
 const keyHintStyle: React.CSSProperties = {
   position: 'absolute',
-  bottom: 8,
+  top: '100%',
+  left: 0,
+  right: 0,
+  marginTop: 6,
   fontSize: 10,
   color: 'rgba(255,200,80,0.45)',
+  textAlign: 'center',
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
   pointerEvents: 'none',
   zIndex: 0,
 }

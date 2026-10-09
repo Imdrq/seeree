@@ -17,6 +17,8 @@ interface LiquidGlassProps {
   tintG?: number
   tintB?: number
   saturation?: number
+  colorA?: [number, number, number] // 底部颜色
+  colorB?: [number, number, number] // 顶部颜色
 }
 
 function compileShader(gl: WebGLRenderingContext, type: number, src: string): WebGLShader | null {
@@ -55,6 +57,8 @@ export default function LiquidGlassCanvas({
   tintAmount = 0.10,
   tintR = 1, tintG = 1, tintB = 1,
   saturation = 1.12,
+  colorA = [0.05, 0.05, 0.11],
+  colorB = [0.07, 0.06, 0.15],
 }: LiquidGlassProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const animRef = useRef(0)
@@ -108,6 +112,8 @@ export default function LiquidGlassCanvas({
       saturation: gl.getUniformLocation(prog, 'uSaturation'),
       radius: gl.getUniformLocation(prog, 'uRadius'),
       size: gl.getUniformLocation(prog, 'uSize'),
+      colorA: gl.getUniformLocation(prog, 'uColorA'),
+      colorB: gl.getUniformLocation(prog, 'uColorB'),
     }
 
     // ── Draw（shader 自行生成颜色，无需纹理） ──
@@ -131,6 +137,8 @@ export default function LiquidGlassCanvas({
       glCtx.uniform1f(u.saturation, saturation)
       glCtx.uniform1f(u.radius, radius * dpr)
       glCtx.uniform2f(u.size, w, h)
+      glCtx.uniform3f(u.colorA, colorA[0], colorA[1], colorA[2])
+      glCtx.uniform3f(u.colorB, colorB[0], colorB[1], colorB[2])
 
       glCtx.drawArrays(glCtx.TRIANGLE_STRIP, 0, 4)
     }
@@ -144,7 +152,7 @@ export default function LiquidGlassCanvas({
       gl.deleteProgram(prog)
       gl.deleteBuffer(buf)
     }
-  }, [width, height, radius, tintAmount, tintR, tintG, tintB, saturation])
+  }, [width, height, radius, tintAmount, tintR, tintG, tintB, saturation, colorA, colorB])
 
   if (webglFailed) return null
 

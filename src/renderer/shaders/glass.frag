@@ -1,5 +1,5 @@
-// Liquid Glass Fragment Shader — 极简版
-// 圆角内：深色渐变；圆角外：完全透明
+// Liquid Glass Fragment Shader
+// 圆角内：渐变；圆角外：完全透明
 
 precision highp float;
 
@@ -11,6 +11,8 @@ uniform vec3  uTint;
 uniform float uSaturation;
 uniform float uRadius;
 uniform vec2  uSize;
+uniform vec3  uColorA; // 底部颜色
+uniform vec3  uColorB; // 顶部颜色
 
 float roundedBoxSDF(vec2 p, vec2 halfSize, float radius) {
   vec2 q = abs(p) - halfSize + radius;
@@ -24,8 +26,8 @@ void main() {
   // 圆角外完全透明
   if (dist > 0.0) { gl_FragColor = vec4(0.0); return; }
 
-  // 简单深色渐变
-  vec3 color = mix(vec3(0.05, 0.05, 0.11), vec3(0.07, 0.06, 0.15), vUV.y);
+  // 深色渐变（颜色由主题控制）
+  vec3 color = mix(uColorA, uColorB, vUV.y);
   color = mix(color, uTint, uTintAmount);
 
   float grey = dot(color, vec3(0.299, 0.587, 0.114));

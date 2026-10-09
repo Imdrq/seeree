@@ -179,20 +179,67 @@ function getRendererURL(hash?: string): string {
   return hash ? `${baseURL}#${hash}` : baseURL
 }
 
+/* ═══════════ 窗口尺寸 / 停靠 ═══════════ */
+
+type WindowMode = 'bubble' | 'settings' | 'onboarding'
+
+/** 气泡态：包住展开输入框 420×220，四周留少量拖拽/齿轮余量 */
+const WIN_BUBBLE = { width: 448, height: 256 }
+/** 设置面板（ControlPanel 固定 680×480） */
+const WIN_SETTINGS = { width: 680, height: 480 }
+/** 引导面板（Onboarding 宽 520） */
+const WIN_ONBOARDING = { width: 560, height: 500 }
+/** 距工作区右上角的默认边距 */
+const DOCK_MARGIN = 16
+
+function winSizeFor(mode: WindowMode): { width: number; height: number } {
+  if (mode === 'settings') return WIN_SETTINGS
+  if (mode === 'onboarding') return WIN_ONBOARDING
+  return WIN_BUBBLE
+}
+
+/** 停靠到屏幕工作区右上角 */
+function dockTopRight(win: BrowserWindow, width: number, height: number): void {
+  const { workArea } = screen.getPrimaryDisplay()
+  const x = workArea.x + workArea.width - width - DOCK_MARGIN
+  const y = workArea.y + DOCK_MARGIN
+  win.setBounds({ x: Math.round(x), y: Math.round(y), width, height })
+}
+
+/**
+ * 切换窗口尺寸，保持右上角锚点不动：
+ * 打开设置时向左下展开，收起时缩回气泡，不会跳走。
+ * 展开后的矩形会被钳制回工作区内，避免贴边拖拽后跑出屏幕。
+ */
+function applyWindowMode(mode: WindowMode): void {
+  const win = mainWindow
+  if (!win || win.isDestroyed()) return
+  const { width, height } = winSizeFor(mode)
+  const [oldX, oldY] = win.getPosition()
+  const [oldW] = win.getSize()
+  const { workArea } = screen.getPrimaryDisplay()
+  let x = oldX + oldW - width
+  let y = oldY
+  x = Math.min(Math.max(x, workArea.x), workArea.x + workArea.width - width)
+  y = Math.min(Math.max(y, workArea.y), workArea.y + workArea.height - height)
+  win.setBounds({ x: Math.round(x), y: Math.round(y), width, height })
+}
+
 function createWindow(): void {
-  const { width: screenWidth } = screen.getPrimaryDisplay().workAreaSize
+  const { width, height } = WIN_BUBBLE
+  const { workArea } = screen.getPrimaryDisplay()
 
   mainWindow = new BrowserWindow({
-    width: 360,
-    height: 216,
-    x: screenWidth - 370,
-    y: 30,
+    width,
+    height,
+    x: workArea.x + workArea.width - width - DOCK_MARGIN,
+    y: workArea.y + DOCK_MARGIN,
     transparent: true,
     frame: false,
     thickFrame: false,
     alwaysOnTop: true,
     skipTaskbar: false,
-    resizable: true,
+    resizable: false,
     hasShadow: false,
     backgroundColor: '#00000000',
     focusable: true,
@@ -206,7 +253,6 @@ function createWindow(): void {
 
   mainWindow.setHasShadow(false)
   mainWindow.setAlwaysOnTop(true)
-  // 防止窗口被截屏捕获（避免 Liquid Glass 桌面捕获递归）
   try { mainWindow.setContentProtection(true) } catch { /* ignore */ }
   mainWindow.loadURL(getRendererURL())
 }
@@ -214,20 +260,55 @@ function createWindow(): void {
 function registerIpcHandlers(): void {
   ipcMain.handle('resize-for-settings', async () => {
     if (!mainWindow) return
-    // 不使用 backgroundMaterial:'acrylic'——它作用于整个矩形窗口，CSS 圆角裁不掉，导致圆角外露灰白底
-    pendingGlassBackdrop = null
-    mainWindow.setSize(680, 480)
-    mainWindow.center()
-    mainWindow.setResizable(false)
+    applyWindowMode('settings')
+    mainWindow.show()
+    mainWindow.focus()
   })
 
   ipcMain.handle('resize-for-bubble', () => {
     if (!mainWindow) return
-    pendingGlassBackdrop = null
-    const { width: screenW } = screen.getPrimaryDisplay().workAreaSize
-    mainWindow.setSize(360, 216)
-    mainWindow.setPosition(screenW - 370, 30)
-    mainWindow.setResizable(true)
+    applyWindowMode('bubble')
+    mainWindow.show()
+    mainWindow.focus()
+    mainWindow.moveTop()
+  })
+
+  ipcMain.handle('resize-for-onboarding', () => {
+    if (!mainWindow) return
+    // 引导是一次性全屏向导，重新停靠到右上角更稳（避免从任意拖拽位置突兀展开）
+    dockTopRight(mainWindow, WIN_ONBOARDING.width, WIN_ONBOARDING.height)
+    mainWindow.show()
+    mainWindow.focus()
+  })
+
+  ipcMain.handle('resize-for-input', () => {
+    if (!mainWindow) return
+    applyWindowMode('bubble')
+    mainWindow.show()
+    mainWindow.focus()
+    mainWindow.moveTop()
+  })
+
+  // 更新输入面板快捷键
+  ipcMain.handle('update-hotkey', (_, hotkey: string) => {
+    if (!hotkey) return { ok: false, message: '快捷键不能为空' }
+    try { globalShortcut.unregister(inputHotkey) } catch { /* ignore */ }
+    inputHotkey = hotkey
+    const ok = registerInputHotkey(hotkey)
+    return ok
+      ? { ok: true, message: `快捷键已设置为 ${hotkey}` }
+      : { ok: false, message: `快捷键 ${hotkey} 注册失败（可能被占用）` }
+  })
+
+  // 更新语音输入快捷键
+  ipcMain.handle('update-voice-hotkey', (_, hotkey: string) => {
+    if (!hotkey) return { ok: false, message: '快捷键不能为空' }
+    try { globalShortcut.unregister(voiceHotkey) } catch { /* ignore */ }
+    voiceHotkey = hotkey
+    const ok = registerVoiceHotkey(hotkey)
+    return ok
+      ? { ok: true, message: `语音快捷键已设置为 ${hotkey}` }
+      : { ok: false, message: `语音快捷键 ${hotkey} 注册失败（可能被占用）` }
   })
 
   ipcMain.handle('hide-window', () => {
@@ -663,6 +744,11 @@ ipcMain.handle('whisper:transcribe', async (_, params: { audio: string; language
   }
 })
 
+// 当前输入面板快捷键（可通过设置修改）
+let inputHotkey = 'Ctrl+T'
+// 语音输入快捷键
+let voiceHotkey = 'Ctrl+Shift+V'
+
 function registerShortcuts(): void {
   globalShortcut.register('Alt+Space', () => {
     if (!mainWindow) return
@@ -673,6 +759,39 @@ function registerShortcuts(): void {
       mainWindow.focus()
     }
   })
+
+  // 输入面板快捷键：打开窗口并通知渲染进程展开输入面板
+  registerInputHotkey(inputHotkey)
+  // 语音输入快捷键
+  registerVoiceHotkey(voiceHotkey)
+}
+
+function registerInputHotkey(hotkey: string): boolean {
+  try {
+    globalShortcut.register(hotkey, () => {
+      if (!mainWindow) return
+      mainWindow.show()
+      mainWindow.focus()
+      mainWindow.webContents.send('toggle-input-panel')
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function registerVoiceHotkey(hotkey: string): boolean {
+  try {
+    globalShortcut.register(hotkey, () => {
+      if (!mainWindow) return
+      mainWindow.show()
+      mainWindow.focus()
+      mainWindow.webContents.send('toggle-voice-input')
+    })
+    return true
+  } catch {
+    return false
+  }
 }
 
 app.whenReady().then(() => {

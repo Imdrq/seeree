@@ -36,6 +36,62 @@ const DEFAULT_SEARCH_CONFIG: SearchConfig = {
 
 const SEARCH_STORAGE_KEY = 'siri-search-config'
 
+/** 输入面板快捷键 */
+const HOTKEY_STORAGE_KEY = 'siri-input-hotkey'
+const DEFAULT_HOTKEY = 'Ctrl+T'
+
+function loadHotkey(): string {
+  try { return localStorage.getItem(HOTKEY_STORAGE_KEY) || DEFAULT_HOTKEY } catch { return DEFAULT_HOTKEY }
+}
+
+/** 语音输入快捷键 */
+const VOICE_HOTKEY_STORAGE_KEY = 'siri-voice-hotkey'
+const DEFAULT_VOICE_HOTKEY = 'Ctrl+Shift+V'
+
+function loadVoiceHotkey(): string {
+  try { return localStorage.getItem(VOICE_HOTKEY_STORAGE_KEY) || DEFAULT_VOICE_HOTKEY } catch { return DEFAULT_VOICE_HOTKEY }
+}
+
+/** 主题 */
+export type Theme = 'purple-blue' | 'obsidian'
+const THEME_STORAGE_KEY = 'siri-theme'
+
+export function loadTheme(): Theme {
+  try { return (localStorage.getItem(THEME_STORAGE_KEY) as Theme) || 'purple-blue' } catch { return 'purple-blue' }
+}
+
+/** 语言 */
+export type Lang = 'zh' | 'en'
+const LANG_STORAGE_KEY = 'siri-lang'
+
+export function loadLang(): Lang {
+  try { return (localStorage.getItem(LANG_STORAGE_KEY) as Lang) || 'zh' } catch { return 'zh' }
+}
+
+/** 主题色彩 */
+export const THEME_COLORS = {
+  'purple-blue': {
+    bubbleBg: 'rgba(25,12,55,0.45)',
+    bubbleBgActive: 'rgba(25,12,55,0.6)',
+    inputBg: 'radial-gradient(ellipse 95% 92% at 50% 50%, rgba(18,8,45,0.95) 68%, rgba(18,8,45,0.5) 90%, transparent 100%)',
+    settingsBg: '#0c0818',
+    settingsCard: 'rgba(255,255,255,0.05)',
+    textPrimary: 'rgba(255,255,255,0.85)',
+    textSecondary: 'rgba(255,255,255,0.45)',
+    accent: 'rgba(99,200,255,0.8)',
+  },
+  'obsidian': {
+    bubbleBg: 'rgba(0,0,0,0.55)',
+    bubbleBgActive: 'rgba(0,0,0,0.7)',
+    inputBg: 'radial-gradient(ellipse 95% 92% at 50% 50%, rgba(0,0,0,0.97) 68%, rgba(0,0,0,0.5) 90%, transparent 100%)',
+    settingsBg: '#000000',
+    settingsCard: 'rgba(255,255,255,0.03)',
+    textPrimary: 'rgba(255,255,255,0.7)',
+    textSecondary: 'rgba(255,255,255,0.3)',
+    accent: 'rgba(255,255,255,0.5)',
+  },
+} as const
+
 const STATIC_MODELS: Record<AIProvider, string[]> = {
   openai: ['GPT-5', 'GPT-4o', 'GPT-4-turbo', 'GPT-3.5-turbo'],
   ollama: [], // 动态从本地 Ollama 获取
@@ -101,6 +157,40 @@ export function useAIConfig() {
       localStorage.setItem(SEARCH_STORAGE_KEY, JSON.stringify(next))
       return next
     })
+  }, [])
+
+  // ── 输入面板快捷键 ──
+  const [inputHotkey, setInputHotkey] = useState<string>(loadHotkey)
+
+  const updateInputHotkey = useCallback((hotkey: string) => {
+    setInputHotkey(hotkey)
+    try { localStorage.setItem(HOTKEY_STORAGE_KEY, hotkey) } catch { /* ignore */ }
+    window.electronAPI?.updateHotkey?.(hotkey)
+  }, [])
+
+  // ── 语音输入快捷键 ──
+  const [voiceHotkey, setVoiceHotkey] = useState<string>(loadVoiceHotkey)
+
+  const updateVoiceHotkey = useCallback((hotkey: string) => {
+    setVoiceHotkey(hotkey)
+    try { localStorage.setItem(VOICE_HOTKEY_STORAGE_KEY, hotkey) } catch { /* ignore */ }
+    window.electronAPI?.updateVoiceHotkey?.(hotkey)
+  }, [])
+
+  // ── 主题 ──
+  const [theme, setTheme] = useState<Theme>(loadTheme)
+
+  const updateTheme = useCallback((t: Theme) => {
+    setTheme(t)
+    try { localStorage.setItem(THEME_STORAGE_KEY, t) } catch { /* ignore */ }
+  }, [])
+
+  // ── 语言 ──
+  const [lang, setLang] = useState<Lang>(loadLang)
+
+  const updateLang = useCallback((l: Lang) => {
+    setLang(l)
+    try { localStorage.setItem(LANG_STORAGE_KEY, l) } catch { /* ignore */ }
   }, [])
 
   // 动态 Ollama 模型列表（本地已安装）
@@ -274,5 +364,9 @@ export function useAIConfig() {
     models, isConfigured,
     ollamaModels, ollamaLoading, ollamaError, refreshOllamaModels,
     searchConfig, updateSearchConfig,
+    inputHotkey, updateInputHotkey,
+    voiceHotkey, updateVoiceHotkey,
+    theme, updateTheme,
+    lang, updateLang,
   }
 }
